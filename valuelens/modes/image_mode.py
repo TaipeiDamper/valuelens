@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Optional
 
@@ -166,7 +166,9 @@ class ImageModeDialog(QDialog):
         
         self._result = quantize_gray(
             self._source, self.levels, self.min_value, self.max_value, self.exp_value,
-            blur_radius=eff_blur, dither_strength=eff_dither, dither_first=getattr(self, 'dither_first', False)
+            blur_radius=eff_blur,
+            dither_strength=eff_dither,
+            dither_first=getattr(self, 'dither_first', False)
         )
         self.preview.setPixmap(_bgr_to_qpixmap(self._result).scaled(
             self.preview.size(),

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -45,7 +45,17 @@ class SettingsManager:
             return AppSettings()
 
         defaults = asdict(AppSettings())
-        merged = {**defaults, **raw}
+        # Migration Revert
+        if "clean_strength" in raw:
+            raw["blur_radius"] = raw.pop("clean_strength") // 2
+            raw["blur_enabled"] = raw.pop("clean_enabled", True)
+        if "bilateral_radius" in raw:
+            raw["blur_radius"] = raw.pop("bilateral_radius")
+            raw["blur_enabled"] = raw.pop("bilateral_enabled", True)
+            
+        # Filter only valid fields to prevent TypeError
+        valid_raw = {k: v for k, v in raw.items() if k in defaults}
+        merged = {**defaults, **valid_raw}
         return AppSettings(**merged)
 
     def save(self, settings: AppSettings) -> None:

@@ -120,13 +120,14 @@ class OverlayWindow(QMainWindow):
         self._resize_start_global: QPoint | None = None
         self._frame = QPixmap()
         self._raw_frame = QPixmap()
-        self._panel_height = 136
+        self._panel_height = 170
         self._compare_gap = 6
         self._last_toggle_ts = 0.0
         self._is_dragging = False
         self._is_resizing = False
         self._is_refreshing = False
-        self._active_refresh_ms = max(80, int(self.settings.refresh_ms))
+        self._active_refresh_ms = max(16, int(self.settings.refresh_ms))
+        self._interaction_refresh_ms = 33 # 30 FPS for dragging/resizing
         self._idle_refresh_ms = 2000
         self._motion_boost_until = 0.0
         self._last_capture_rect: tuple[int, int, int, int] | None = None
@@ -163,7 +164,7 @@ class OverlayWindow(QMainWindow):
         self._layout_panel()
 
         self.btn_compare_bw = QToolButton(self)
-        self.btn_compare_bw.setText("對照")
+        self.btn_compare_bw.setText("黑白")
         self.btn_compare_bw.setCheckable(True)
         self.btn_compare_bw.setChecked(self.settings.compare_bw)
         self.btn_compare_bw.setToolTip("將對比圖轉換為純灰階顯示")
@@ -202,17 +203,17 @@ class OverlayWindow(QMainWindow):
         self.settings.min_value = min_value
         self.settings.max_value = max_value
         self.settings.exp_value = exp_value
-        self._processed_distribution_pct = [0.0] * max(2, int(levels))
-        self._raw_distribution_pct = [0.0] * max(2, int(levels))
         self.image_mode.set_quantize_settings(
             levels, min_value, max_value, exp_value,
             self.settings.blur_enabled, self.settings.blur_radius,
             self.settings.dither_enabled, self.settings.dither_strength,
             getattr(self.settings, 'dither_first', False)
         )
+        self._processed_distribution_pct = [0.0] * max(2, int(levels))
+        self._raw_distribution_pct = [0.0] * max(2, int(levels))
         self._last_frame_signature = None
-        self._boost_motion(2.0)
-        self.request_refresh()
+        self._boost_motion(1.0)
+        self.request_refresh(16)
 
     def on_display_settings_changed(self, min_value: int, max_value: int, exp_value: float) -> None:
         self.settings.display_min_value = min_value
@@ -220,21 +221,27 @@ class OverlayWindow(QMainWindow):
         self.settings.display_exp_value = exp_value
         self._last_frame_signature = None
         self._boost_motion(1.0)
-        self.request_refresh()
+        self.request_refresh(16)
 
-    def on_effect_settings_changed(self, blur_enabled: bool, blur_radius: int, dither_enabled: bool, dither_strength: int, dither_first: bool) -> None:
+    def on_effect_settings_changed(
+        self, blur_enabled: bool, blur_radius: int,
+        dither_enabled: bool, dither_strength: int,
+        dither_first: bool
+    ) -> None:
         self.settings.blur_enabled = blur_enabled
         self.settings.blur_radius = blur_radius
         self.settings.dither_enabled = dither_enabled
         self.settings.dither_strength = dither_strength
         self.settings.dither_first = dither_first
+        # Update image mode if active
         self.image_mode.set_quantize_settings(
             self.settings.levels, self.settings.min_value, self.settings.max_value, self.settings.exp_value,
-            blur_enabled, blur_radius, dither_enabled, dither_strength, dither_first
+            blur_enabled, blur_radius,
+            dither_enabled, dither_strength, dither_first
         )
         self._last_frame_signature = None
         self._boost_motion(1.0)
-        self.request_refresh()
+        self.request_refresh(16)
 
     def on_collapse_toggled(self, collapsed: bool) -> None:
         self._panel_height = 36 if collapsed else 136
@@ -343,11 +350,19 @@ class OverlayWindow(QMainWindow):
 
     def _on_timer_tick(self) -> None:
         now = time.monotonic()
-        in_active_window = now < self._motion_boost_until
-        target_ms = self._active_refresh_ms if in_active_window else self._idle_refresh_ms
+        is_interaction = self._is_dragging or self._is_resizing or (now < self._motion_boost_until)
+        
+        if is_interaction:
+            target_ms = self._interaction_refresh_ms
+        else:
+            target_ms = self._idle_refresh_ms
+
         if self.timer.interval() != target_ms:
             self.timer.setInterval(target_ms)
-        self.request_refresh(0 if in_active_window else 20)
+        
+        # When active, use minimal delay
+        delay = 0 if is_interaction else 100
+        self.request_refresh(delay)
 
     def _hwnd(self) -> int | None:
         try:
@@ -415,41 +430,38 @@ class OverlayWindow(QMainWindow):
 
             eff_blur = self.settings.blur_radius if self.settings.blur_enabled else 0
             eff_dither = self.settings.dither_strength if self.settings.dither_enabled else 0
-
+            
             logic_quantized, logic_indices = quantize_gray_with_indices(
                 frame,
                 self.settings.levels,
                 self.settings.min_value,
                 self.settings.max_value,
                 self.settings.exp_value,
-                fixed_output_levels=True,
+                display_min=self.settings.display_min_value,
+                display_max=self.settings.display_max_value,
+                display_exp=self.settings.display_exp_value,
                 blur_radius=eff_blur,
                 dither_strength=eff_dither,
                 dither_first=getattr(self.settings, 'dither_first', False),
             )
-            # Display stage is applied on top of logic output.
-            display_quantized = quantize_gray(
-                logic_quantized,
-                self.settings.levels,
-                self.settings.display_min_value,
-                self.settings.display_max_value,
-                self.settings.display_exp_value,
-                fixed_output_levels=False,
-            )
-            h, w, _ = display_quantized.shape
-            rgb = cv2.cvtColor(display_quantized, cv2.COLOR_BGR2RGB)
-            qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format.Format_RGB888).copy()
+            h, w = logic_quantized.shape[:2]
+            # Create QImage directly from grayscale numpy array to save multiple color conversions
+            qimg = QImage(
+                logic_quantized.data, w, h, logic_quantized.strides[0], QImage.Format.Format_Grayscale8
+            ).copy()
             qimg.setDevicePixelRatio(dpr)
             self._frame = QPixmap.fromImage(qimg)
             self._update_distributions(self._last_gray_frame, logic_indices)
             if self._compare_mode:
                 if self.settings.compare_bw:
-                    raw_rgb = cv2.cvtColor(self._last_gray_frame, cv2.COLOR_GRAY2RGB)
+                    raw_qimg = QImage(
+                        self._last_gray_frame.data, w, h, self._last_gray_frame.strides[0], QImage.Format.Format_Grayscale8
+                    ).copy()
                 else:
                     raw_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                raw_qimg = QImage(
-                    raw_rgb.data, w, h, raw_rgb.strides[0], QImage.Format.Format_RGB888
-                ).copy()
+                    raw_qimg = QImage(
+                        raw_rgb.data, w, h, raw_rgb.strides[0], QImage.Format.Format_RGB888
+                    ).copy()
                 raw_qimg.setDevicePixelRatio(dpr)
                 self._raw_frame = QPixmap.fromImage(raw_qimg)
                 self.update(self.rect())
@@ -654,7 +666,7 @@ class OverlayWindow(QMainWindow):
         values = np.arange(256, dtype=np.float64)
         clipped = np.clip(values, lower, upper)
         normalized = (clipped - float(lower)) / float(upper - lower)
-        gamma = float(np.exp(float(exp_value)))
+        gamma = float(np.power(2.0, float(exp_value)))
         mapped = np.power(normalized, gamma)
         indices = np.floor(mapped * levels)
         indices = np.clip(indices, 0, levels - 1).astype(np.int32)
@@ -776,15 +788,15 @@ class OverlayWindow(QMainWindow):
             if self._resize_edges & _EDGE_BOTTOM:
                 g.setBottom(max(g.top() + _MIN_HEIGHT - 1, g.bottom() + delta.y()))
             self.setGeometry(g)
-            self._boost_motion(1.5)
-            self.request_refresh(60)
+            self._boost_motion(1.0)
+            self.request_refresh(0)
             return
 
         if self._drag_pos is None:
             return
         self.move(event.globalPosition().toPoint() - self._drag_pos)
-        self._boost_motion(2.0)
-        self.request_refresh(120)
+        self._boost_motion(1.0)
+        self.request_refresh(0)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
         self._drag_pos = None

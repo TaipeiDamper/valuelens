@@ -31,8 +31,9 @@ _BALANCE_PRESETS: list[tuple[float, float, float]] = [
 ]
 
 _PANEL_STYLE = """
-QWidget#gl_panel { background: #1e1e22; color: #e0e0e0; border-top: 2px solid #444; }
-QLabel { color: #aaa; background: transparent; font-size: 9pt; }
+QWidget#gl_panel { background: #1e1e22; color: #e0e0e0; border-top: 4px solid #3d89ff; }
+QWidget#gl_top_row_bg { background: #252529; border-bottom: 1px solid #333; }
+QLabel { color: #ccc; background: transparent; font-size: 9pt; }
 QToolButton { 
     color: #eee; 
     background: #333; 
@@ -77,9 +78,9 @@ QPushButton[best="true"] { border: 1px solid #2e7bf6; color: #5fb4fa; font-weigh
 QPushButton[best="true"]:checked { color: white; border: 1px solid #fff; }
 
 QSlider::groove:horizontal {
-    border: 1px solid #333;
+    border: 1px solid #444;
     height: 4px;
-    background: #333;
+    background: #444;
     margin: 2px 0;
     border-radius: 2px;
 }
@@ -101,7 +102,7 @@ QSlider::handle:horizontal:hover {
 class ControlPanel(QWidget):
     settings_changed = Signal(int, int, int, float)
     display_settings_changed = Signal(int, int, float)
-    effect_settings_changed = Signal(bool, int, bool, int, bool)
+    effect_settings_changed = Signal(bool, int, bool, int, bool) # blur, b_r, dither, d_s, d_first
     collapse_toggled = Signal(bool)
     compare_mode_changed = Signal(bool)
     hotkey_changed = Signal(str)
@@ -115,7 +116,7 @@ class ControlPanel(QWidget):
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("gl_panel")
-        self.setFixedHeight(136)
+        self.setFixedHeight(136) # Back to smaller height as it's one row now
         self.setStyleSheet(_PANEL_STYLE)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
@@ -189,22 +190,14 @@ class ControlPanel(QWidget):
 
         self.balance_raw_btn = QToolButton()
         self.balance_raw_btn.setText("自動平衡")
-        self.balance_raw_btn.setToolTip("根據目前原始畫面自動平衡")
-        self.balance_target_btn = QToolButton()
-        self.balance_target_btn.setText("目標平衡")
-        self.balance_target_btn.setToolTip("根據選定比例進行平衡優化")
+        self.balance_raw_btn.setToolTip("根據目前畫面分佈，自動切換至最接近的預設比例並套用")
 
-        self.preset_group = QButtonGroup(self)
-        self.preset_group.setExclusive(True)
-        self.preset_buttons = []
+        self.balance_presets = QComboBox()
         for i, (white, gray, black) in enumerate(_BALANCE_PRESETS):
             name = f"{int(white)}:{int(gray)}:{int(black)}"
-            btn = QPushButton(name)
-            btn.setCheckable(True)
-            btn.setStyleSheet("padding: 2px 6px; font-size: 9pt;")
-            self.preset_group.addButton(btn, i)
-            self.preset_buttons.append(btn)
-        self.preset_buttons[0].setChecked(True)
+            self.balance_presets.addItem(name, (white, gray, black))
+        self.balance_presets.setFixedWidth(100)
+        self.balance_presets.setToolTip("平衡預設比例")
 
         self.logic_reset_btn = QToolButton()
         self.logic_reset_btn.setText("Reset")
@@ -213,14 +206,16 @@ class ControlPanel(QWidget):
         self.display_reset_btn.setText("Reset")
         self.display_reset_btn.setToolTip("重置第二階段 (Display) 參數")
 
-        self.blur_check = QCheckBox("平滑 Blur")
+        # Bilateral
+        self.blur_check = QCheckBox("平滑 Bilateral")
         self.blur_check.setChecked(settings.blur_enabled)
         self.blur_slider = QSlider(Qt.Orientation.Horizontal)
         self.blur_slider.setRange(0, 50)
         self.blur_slider.setValue(settings.blur_radius)
         self.blur_slider.setFixedWidth(110)
-        
-        self.dither_check = QCheckBox("遞色 Dither")
+
+        # Dither
+        self.dither_check = QCheckBox("遞色 Ordered")
         self.dither_check.setChecked(settings.dither_enabled)
         self.dither_slider = QSlider(Qt.Orientation.Horizontal)
         self.dither_slider.setRange(0, 100)
@@ -230,8 +225,9 @@ class ControlPanel(QWidget):
         self.order_btn = QToolButton()
         self.order_btn.setCheckable(True)
         self.order_btn.setChecked(getattr(settings, 'dither_first', False))
-        self.order_btn.setText("先平滑後遞色" if not getattr(settings, 'dither_first', False) else "先遞色後平滑")
+        self.order_btn.setText("先 Bilateral 後 Ordered" if not getattr(settings, 'dither_first', False) else "先 Ordered 後 Bilateral")
         self.order_btn.setToolTip("點擊切換平滑與遞色兩階段的處理順序")
+        self.order_btn.toggled.connect(self._on_order_toggled)
         self.order_btn.toggled.connect(self._on_order_toggled)
 
         self.collapse_btn = QToolButton()
@@ -241,34 +237,34 @@ class ControlPanel(QWidget):
         self.collapse_btn.setChecked(False)
         self.collapse_btn.toggled.connect(self._on_collapse_toggled)
 
-        preset_layout = QHBoxLayout()
-        preset_layout.setSpacing(2)
-        for btn in self.preset_buttons:
-            preset_layout.addWidget(btn)
 
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(8, 8, 8, 4)
-        top_row.setSpacing(10)
-        top_row.addWidget(QLabel("階層"))
-        top_row.addWidget(self.levels)
-        top_row.addWidget(self.enabled_check)
-        top_row.addSpacing(10)
-        top_row.addLayout(preset_layout)
-        top_row.addWidget(self.balance_raw_btn)
-        top_row.addWidget(self.balance_target_btn)
-        top_row.addStretch(1)
-        top_row.addWidget(self.collapse_btn)
-        top_row.addWidget(self.more_btn)
-        top_row.addSpacing(10)
-        top_row.addWidget(self.min_btn)
-        top_row.addWidget(self.close_btn)
+        top_layout = QHBoxLayout()
+        top_layout.setContentsMargins(8, 8, 8, 4)
+        top_layout.setSpacing(10)
+        top_layout.addWidget(QLabel("階層"))
+        top_layout.addWidget(self.levels)
+        top_layout.addWidget(self.enabled_check)
+        top_layout.addSpacing(4)
+        top_layout.addWidget(self.balance_presets)
+        top_layout.addWidget(self.balance_raw_btn)
+        top_layout.addStretch(1)
+        top_layout.addWidget(self.collapse_btn)
+        top_layout.addWidget(self.more_btn)
+        top_layout.addSpacing(10)
+        top_layout.addWidget(self.min_btn)
+        top_layout.addWidget(self.close_btn)
+
+        self.top_row_widget = QWidget()
+        self.top_row_widget.setObjectName("gl_top_row_bg")
+        self.top_row_widget.setLayout(top_layout)
 
         row2 = QHBoxLayout()
         row2.setContentsMargins(8, 0, 8, 2)
         row2.setSpacing(8)
         row2.addWidget(QLabel("Logic Range"))
         row2.addWidget(self.range_slider, 2)
-        row2.addWidget(QLabel("Logic exp"))
+        self.logic_exp_label = QLabel("Logic")
+        row2.addWidget(self.logic_exp_label)
         row2.addWidget(self.exp_slider)
         row2.addWidget(self.logic_reset_btn)
 
@@ -287,7 +283,8 @@ class ControlPanel(QWidget):
         bottom_row.setSpacing(8)
         bottom_row.addWidget(QLabel("Display Range"))
         bottom_row.addWidget(self.display_range_slider, 2)
-        bottom_row.addWidget(QLabel("Display exp"))
+        self.display_exp_label = QLabel("Display")
+        bottom_row.addWidget(self.display_exp_label)
         bottom_row.addWidget(self.display_exp_slider)
         bottom_row.addWidget(self.display_reset_btn)
 
@@ -302,15 +299,15 @@ class ControlPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addLayout(top_row)
+        layout.addWidget(self.top_row_widget)
         layout.addWidget(self.extra_container)
 
         self.levels.currentIndexChanged.connect(self._emit_settings)
+        self.enabled_check.toggled.connect(self.compare_mode_changed.emit)
         self.range_slider.range_changed.connect(self._on_range_change)
         self.exp_slider.valueChanged.connect(self._emit_settings)
         self.display_range_slider.range_changed.connect(self._on_display_range_change)
         self.display_exp_slider.valueChanged.connect(self._emit_display_settings)
-        self.enabled_check.toggled.connect(self.compare_mode_changed.emit)
         self.blur_check.toggled.connect(self._emit_effect_settings)
         self.blur_slider.valueChanged.connect(self._emit_effect_settings)
         self.dither_check.toggled.connect(self._emit_effect_settings)
@@ -320,8 +317,8 @@ class ControlPanel(QWidget):
         self.quit_action.triggered.connect(self.quit_requested.emit)
         self.min_btn.clicked.connect(self.minimize_requested.emit)
         self.close_btn.clicked.connect(self.quit_requested.emit)
+        self.balance_presets.currentIndexChanged.connect(self._request_target_auto_balance)
         self.balance_raw_btn.clicked.connect(self._request_raw_auto_balance)
-        self.balance_target_btn.clicked.connect(self._request_target_auto_balance)
         self.logic_reset_btn.clicked.connect(self._reset_logic_settings)
         self.display_reset_btn.clicked.connect(self._reset_display_settings)
 
@@ -344,25 +341,29 @@ class ControlPanel(QWidget):
         self._emit_settings()
 
     def _emit_settings(self, *_) -> None:
+        val = -self.exp_slider.value() / 100.0
+        self.logic_exp_label.setText(f"Logic (2^{val:+.2f})")
         self.settings_changed.emit(
             self._current_levels(),
             self.range_slider.lower_value,
             self.range_slider.upper_value,
-            -self.exp_slider.value() / 100.0,
+            val,
         )
 
     def _on_display_range_change(self, min_value: int, max_value: int) -> None:
         self._emit_display_settings()
 
     def _emit_display_settings(self, *_) -> None:
+        val = -self.display_exp_slider.value() / 100.0
+        self.display_exp_label.setText(f"Display (2^{val:+.2f})")
         self.display_settings_changed.emit(
             self.display_range_slider.lower_value,
             self.display_range_slider.upper_value,
-            -self.display_exp_slider.value() / 100.0,
+            val,
         )
 
     def _on_order_toggled(self, checked: bool) -> None:
-        self.order_btn.setText("先遞色後平滑" if checked else "先平滑後遞色")
+        self.order_btn.setText("先 Ordered 後 Bilateral" if checked else "先 Bilateral 後 Ordered")
         self._emit_effect_settings()
 
     def _emit_effect_settings(self, *_) -> None:
@@ -391,9 +392,9 @@ class ControlPanel(QWidget):
         self.hotkey_changed.emit(value)
 
     def _request_target_auto_balance(self) -> None:
-        idx = self.preset_group.checkedId()
-        idx = max(0, min(len(_BALANCE_PRESETS) - 1, idx))
-        self.auto_balance_target_requested.emit(_BALANCE_PRESETS[idx])
+        data = self.balance_presets.currentData()
+        if data:
+            self.auto_balance_target_requested.emit(data)
 
     def _request_raw_auto_balance(self) -> None:
         self.auto_balance_raw_requested.emit()
@@ -407,17 +408,12 @@ class ControlPanel(QWidget):
                 best_dist = dist
                 best_idx = idx
 
-        for idx, btn in enumerate(self.preset_buttons):
-            w, g, b = _BALANCE_PRESETS[idx]
-            base_name = f"{int(w)}:{int(g)}:{int(b)}"
-            is_best = mark_best and idx == best_idx
-            btn.setText(f"{base_name}*" if is_best else base_name)
-            btn.setProperty("best", "true" if is_best else "false")
-            btn.style().unpolish(btn)
-            btn.style().polish(btn)
+        self.balance_presets.blockSignals(True)
+        self.balance_presets.setCurrentIndex(best_idx)
+        self.balance_presets.blockSignals(False)
         
-        if 0 <= best_idx < len(self.preset_buttons):
-            self.preset_buttons[best_idx].setChecked(True)
+        # We can visually mark the "best" item in the combo box list if needed
+        # but for now, simple selection is much cleaner for the UI.
 
     def nearest_balance_preset(self, ratio_wgb: tuple[float, float, float]) -> tuple[float, float, float]:
         best_idx = 0
@@ -439,6 +435,7 @@ class ControlPanel(QWidget):
         self.display_exp_slider.setValue(0)
         self._emit_display_settings()
 
+
     def sync_from_settings(self, settings: AppSettings) -> None:
         if settings.levels in _LEVEL_PRESETS:
             self.levels.setCurrentIndex(_LEVEL_PRESETS.index(settings.levels))
@@ -454,11 +451,15 @@ class ControlPanel(QWidget):
         self.order_btn.setChecked(getattr(settings, 'dither_first', False))
         self._current_hotkey = settings.hotkey
         self.hotkey_action.setText(f"設定快捷鍵 ({settings.hotkey})")
+        # Update labels
+        self._emit_settings()
+        self._emit_display_settings()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:
             child = self.childAt(event.position().toPoint())
-            if child is None or isinstance(child, QLabel):
+            # Allow dragging on empty space, labels, or the background containers themselves
+            if child in (None, self.top_row_widget, self.extra_container) or isinstance(child, QLabel):
                 self.drag_started.emit(event.globalPosition().toPoint())
                 event.accept()
                 return
