@@ -20,7 +20,7 @@ from valuelens.modes.image_mode import ImageModeDialog
 from valuelens.ui.control_panel import ControlPanel
 
 
-_RESIZE_MARGIN = 6
+_RESIZE_MARGIN = 12
 _MIN_WIDTH = 320
 _MIN_HEIGHT = 160
 

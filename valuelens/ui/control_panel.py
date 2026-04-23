@@ -1,7 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QAction, QMouseEvent, QPainter, QPaintEvent
+from PySide6.QtGui import QAction, QColor, QMouseEvent, QPainter, QPaintEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -31,21 +31,70 @@ _BALANCE_PRESETS: list[tuple[float, float, float]] = [
 ]
 
 _PANEL_STYLE = """
-QWidget#gl_panel { background: rgba(245,245,245,245); color: #111; }
-QLabel { color: #111; background: transparent; }
-QToolButton { color: #111; background: transparent; border: 1px solid #bbb;
-              padding: 2px 8px; border-radius: 3px; }
-QToolButton:hover { background: rgba(0,0,0,20); }
-QToolButton#gl_winbtn { border: none; padding: 0 10px; font-weight: bold; }
-QToolButton#gl_winbtn:hover { background: rgba(0,0,0,25); }
+QWidget#gl_panel { background: #1e1e22; color: #e0e0e0; border-top: 2px solid #444; }
+QLabel { color: #aaa; background: transparent; font-size: 9pt; }
+QToolButton { 
+    color: #eee; 
+    background: #333; 
+    border: 1px solid #444;
+    padding: 3px 10px; 
+    border-radius: 4px; 
+    font-size: 9pt;
+}
+QToolButton:hover { background: #444; border: 1px solid #555; }
+QToolButton:checked { background: #2e7bf6; border: 1px solid #1a5ed1; }
+QToolButton#gl_winbtn { border: none; background: transparent; padding: 0 10px; font-size: 11pt; }
+QToolButton#gl_winbtn:hover { background: rgba(255,255,255,20); }
 QToolButton#gl_closebtn:hover { background: #e81123; color: white; }
-QComboBox { color: #111; background: white; border: 1px solid #bbb; padding: 1px 4px; }
-QCheckBox { color: #111; background: transparent; spacing: 4px; }
-QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #888;
-                       background: white; border-radius: 2px; }
+
+QComboBox { 
+    color: #eee; 
+    background: #2d2d30; 
+    border: 1px solid #444; 
+    border-radius: 4px;
+    padding: 2px 6px; 
+}
+QComboBox::drop-down { border: none; }
+
+QCheckBox { color: #ccc; background: transparent; spacing: 6px; }
+QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #555;
+                       background: #2d2d30; border-radius: 3px; }
 QCheckBox::indicator:checked { background: #2e7bf6; border: 1px solid #1a5ed1;
                                 image: none; }
-QCheckBox::indicator:checked:hover { background: #1a5ed1; }
+QCheckBox::indicator:checked:hover { background: #3b8efb; }
+
+QPushButton {
+    color: #ccc;
+    background: #2d2d30;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 8pt;
+}
+QPushButton:hover { background: #3d3d40; border: 1px solid #555; }
+QPushButton:checked { background: #2e7bf6; color: white; border: 1px solid #1a5ed1; }
+QPushButton[best="true"] { border: 1px solid #2e7bf6; color: #5fb4fa; font-weight: bold; }
+QPushButton[best="true"]:checked { color: white; border: 1px solid #fff; }
+
+QSlider::groove:horizontal {
+    border: 1px solid #333;
+    height: 4px;
+    background: #333;
+    margin: 2px 0;
+    border-radius: 2px;
+}
+QSlider::handle:horizontal {
+    background: #eee;
+    border: 1px solid #aaa;
+    width: 14px;
+    height: 14px;
+    margin: -6px 0;
+    border-radius: 7px;
+}
+QSlider::handle:horizontal:hover {
+    background: #fff;
+    border: 1px solid #2e7bf6;
+}
 """
 
 
@@ -139,11 +188,11 @@ class ControlPanel(QWidget):
         self.close_btn.setStyleSheet("QToolButton { border: none; padding: 0; font-weight: bold; }")
 
         self.balance_raw_btn = QToolButton()
-        self.balance_raw_btn.setText("平衡 (自動)")
+        self.balance_raw_btn.setText("自動平衡")
         self.balance_raw_btn.setToolTip("根據目前原始畫面自動平衡")
         self.balance_target_btn = QToolButton()
-        self.balance_target_btn.setText("平衡 (設定)")
-        self.balance_target_btn.setToolTip("根據選定比例進行手動平衡")
+        self.balance_target_btn.setText("目標平衡")
+        self.balance_target_btn.setToolTip("根據選定比例進行平衡優化")
 
         self.preset_group = QButtonGroup(self)
         self.preset_group.setExclusive(True)
@@ -192,21 +241,25 @@ class ControlPanel(QWidget):
         self.collapse_btn.setChecked(False)
         self.collapse_btn.toggled.connect(self._on_collapse_toggled)
 
+        preset_layout = QHBoxLayout()
+        preset_layout.setSpacing(2)
+        for btn in self.preset_buttons:
+            preset_layout.addWidget(btn)
+
         top_row = QHBoxLayout()
-        top_row.setContentsMargins(8, 4, 8, 2)
-        top_row.setSpacing(8)
+        top_row.setContentsMargins(8, 8, 8, 4)
+        top_row.setSpacing(10)
         top_row.addWidget(QLabel("階層"))
         top_row.addWidget(self.levels)
         top_row.addWidget(self.enabled_check)
-        top_row.addWidget(QLabel("   平衡預設比例"))
-        for btn in self.preset_buttons:
-            top_row.addWidget(btn)
+        top_row.addSpacing(10)
+        top_row.addLayout(preset_layout)
         top_row.addWidget(self.balance_raw_btn)
         top_row.addWidget(self.balance_target_btn)
         top_row.addStretch(1)
         top_row.addWidget(self.collapse_btn)
         top_row.addWidget(self.more_btn)
-        top_row.addSpacing(4)
+        top_row.addSpacing(10)
         top_row.addWidget(self.min_btn)
         top_row.addWidget(self.close_btn)
 
@@ -237,7 +290,6 @@ class ControlPanel(QWidget):
         bottom_row.addWidget(QLabel("Display exp"))
         bottom_row.addWidget(self.display_exp_slider)
         bottom_row.addWidget(self.display_reset_btn)
-        bottom_row.addStretch(1)
 
         self.extra_container = QWidget()
         extra_layout = QVBoxLayout(self.extra_container)
@@ -358,12 +410,11 @@ class ControlPanel(QWidget):
         for idx, btn in enumerate(self.preset_buttons):
             w, g, b = _BALANCE_PRESETS[idx]
             base_name = f"{int(w)}:{int(g)}:{int(b)}"
-            if mark_best and idx == best_idx:
-                btn.setText(f"{base_name}*")
-                btn.setStyleSheet("padding: 2px 6px; font-size: 9pt; font-weight: bold; color: blue;")
-            else:
-                btn.setText(base_name)
-                btn.setStyleSheet("padding: 2px 6px; font-size: 9pt; font-weight: normal; color: black;")
+            is_best = mark_best and idx == best_idx
+            btn.setText(f"{base_name}*" if is_best else base_name)
+            btn.setProperty("best", "true" if is_best else "false")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
         
         if 0 <= best_idx < len(self.preset_buttons):
             self.preset_buttons[best_idx].setChecked(True)
@@ -457,28 +508,28 @@ class DualHandleSlider(QWidget):
 
         track = self._track_rect()
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(Qt.GlobalColor.gray)
+        painter.setBrush(QColor("#333"))
         painter.drawRoundedRect(track, 3, 3)
 
         x1 = self._value_to_x(self.lower_value)
         x2 = self._value_to_x(self.upper_value)
         active = QRect(min(x1, x2), track.top(), abs(x2 - x1), track.height())
-        painter.setBrush(Qt.GlobalColor.blue)
+        painter.setBrush(QColor("#2e7bf6"))
         painter.drawRoundedRect(active, 3, 3)
 
-        painter.setBrush(Qt.GlobalColor.white)
-        painter.setPen(Qt.GlobalColor.darkGray)
+        painter.setPen(QColor("#888"))
         for x in (x1, x2):
+            painter.setBrush(QColor("#eee"))
             handle = QRect(x - 7, track.center().y() - 10, 14, 20)
             painter.drawRoundedRect(handle, 3, 3)
 
     def _lower_hit_rect(self) -> QRect:
         x = self._value_to_x(self.lower_value)
-        return QRect(x - 11, self.height() // 2 - 13, 22, 26)
+        return QRect(x - 15, self.height() // 2 - 13, 30, 26)
 
     def _upper_hit_rect(self) -> QRect:
         x = self._value_to_x(self.upper_value)
-        return QRect(x - 11, self.height() // 2 - 13, 22, 26)
+        return QRect(x - 15, self.height() // 2 - 13, 30, 26)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         pos = event.position().toPoint()
