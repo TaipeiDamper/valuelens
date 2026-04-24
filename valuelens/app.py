@@ -1,4 +1,4 @@
-﻿import os
+import os
 import signal
 import sys
 
@@ -35,12 +35,6 @@ def run() -> None:
     app.setApplicationName("ValueLens")
 
     settings = SettingsManager().load()
-    settings.compare_mode = False
-    settings.blur_enabled = False
-    settings.dither_enabled = False
-    settings.display_min_value = 0
-    settings.display_max_value = 255
-    settings.display_exp_value = 0.0
     window = OverlayWindow(settings=settings)
     window.show()
 

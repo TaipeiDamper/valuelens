@@ -126,12 +126,9 @@ class OverlayWindow(QMainWindow):
         self._is_dragging = False
         self._is_resizing = False
         self._is_refreshing = False
-        self._active_refresh_ms = 33        # 預設 30 FPS
+        self._refresh_ms = 33             # 固定 30 FPS
         self._fps_count = 0                # FPS 計數
         self._fps_last_report = time.time() # 上次報告時間
-        self._interaction_refresh_ms = 33 # 30 FPS for dragging/resizing
-        self._idle_refresh_ms = 2000
-        self._motion_boost_until = 0.0
         self._last_capture_rect: tuple[int, int, int, int] | None = None
         self._last_frame_signature: bytes | None = None
         self._stable_frame_count = 0
@@ -164,7 +161,7 @@ class OverlayWindow(QMainWindow):
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._on_timer_tick)
-        self.timer.start(self._active_refresh_ms)
+        self.timer.start(self._refresh_ms)
 
         self._coalesce_timer = QTimer(self)
         self._coalesce_timer.setSingleShot(True)
@@ -194,14 +191,14 @@ class OverlayWindow(QMainWindow):
         self._layout_panel()
 
         self.hotkeys.register("toggle", self.settings.hotkey, self.toggle_enabled)
-        self.hotkeys.register("quit", "ctrl+alt+shift+q", self.force_quit)
+        self.hotkeys.register("image_mode", "ctrl+alt+i", self.open_image_mode)
+        self.hotkeys.register("collapse", "ctrl+alt+p", lambda: self.panel.collapse_btn.toggle())
+        self.hotkeys.register("quit", "ctrl+alt+q", self.force_quit)
 
         # 拖放支援
         self.setAcceptDrops(True)
 
-        # 啟動時強制重設邊緣偵測並跑一次自動平衡
-        self.settings.edge_enabled = False
-        self.settings.edge_color = (0, 0, 0) # 強制設為黑色
+        # 啟動時跑一次自動平衡
         self.panel.sync_from_settings(self.settings)
         QTimer.singleShot(500, self.on_auto_balance_raw_requested)
 
@@ -225,15 +222,13 @@ class OverlayWindow(QMainWindow):
         # 切換計算範圍時，自動重跑一次平衡
         self._auto_balance_pending = True
         self._auto_balance_use_current = True
-        self._boost_motion(0.5)
-        self.request_refresh(10)
+        self.request_refresh(5)
         self.update()
 
     def on_bypass_toggled(self, bypass: bool) -> None:
         """切換 Bypass 模式：跳過所有處理，顯示原始影像。"""
         self._bypass_mode = bypass
         self._last_frame_signature = None
-        self._boost_motion(0.5)
         self.refresh_frame()
         self.update()
 
@@ -252,7 +247,6 @@ class OverlayWindow(QMainWindow):
             pix = self.grab(self._lens_rect())
             
         cb.setPixmap(pix)
-        self._boost_motion(0.5) 
 
     def toggle_freeze_mode(self) -> None:
         """切換凍結模式：鎖定當前畫面或恢復即時擷取。同時處理 ImageMode 釋放。"""
@@ -429,17 +423,13 @@ class OverlayWindow(QMainWindow):
         self._processed_distribution_pct = [0.0] * max(2, int(levels))
         self._raw_distribution_pct = [0.0] * max(2, int(levels))
         self._last_frame_signature = None
-        self._boost_motion(1.0)
-        # 如果不是自動平衡觸發的，我們請求一次刷新
-        if not self._is_refreshing:
-            self.request_refresh(16)
+        self.request_refresh(5)
 
     def on_display_settings_changed(self, min_value: int, max_value: int, exp_value: float) -> None:
         self.settings.display_min_value = min_value
         self.settings.display_max_value = max_value
         self.settings.display_exp_value = exp_value
         self._last_frame_signature = None
-        self._boost_motion(1.0)
         self.request_refresh(16)
 
     def on_effect_settings_changed(
@@ -459,7 +449,6 @@ class OverlayWindow(QMainWindow):
             dither_enabled, dither_strength, dither_first
         )
         self._last_frame_signature = None
-        self._boost_motion(1.0)
         self.request_refresh(16)
 
     def on_collapse_toggled(self, collapsed: bool) -> None:
@@ -479,14 +468,12 @@ class OverlayWindow(QMainWindow):
         self._last_frame_signature = None
         self._raw_frame = QPixmap()
         self._layout_overlay_buttons()
-        self._boost_motion(1.0)
         self.request_refresh()
 
     def on_compare_bw_changed(self, bw_enabled: bool) -> None:
         self.settings.compare_bw = bw_enabled
         self._last_frame_signature = None
         self._raw_frame = QPixmap()
-        self._boost_motion(1.0)
         self.request_refresh()
 
     def on_hotkey_changed(self, hotkey: str) -> None:
@@ -542,7 +529,6 @@ class OverlayWindow(QMainWindow):
             self._apply_balance_to_ui(lower, upper, exp_value)
             self._last_frame_signature = None
             
-        self._boost_motion(1.0)
         self.refresh_frame()
         self.update()
 
@@ -561,7 +547,6 @@ class OverlayWindow(QMainWindow):
         self.settings.edge_strength = strength
         self.settings.edge_mix = mix
         self._last_frame_signature = None
-        self._boost_motion(1.0)
         self.request_refresh(16)
 
     def on_auto_balance_raw_requested(self) -> None:
@@ -639,27 +624,9 @@ class OverlayWindow(QMainWindow):
         if not self._coalesce_timer.isActive():
             self._coalesce_timer.start(delay_ms)
 
-    def _boost_motion(self, seconds: float) -> None:
-        self._motion_boost_until = max(self._motion_boost_until, time.monotonic() + seconds)
-        self._stable_frame_count = 0
-        if self.timer.interval() != self._active_refresh_ms:
-            self.timer.setInterval(self._active_refresh_ms)
-
     def _on_timer_tick(self) -> None:
-        now = time.monotonic()
-        is_interaction = self._is_dragging or self._is_resizing or (now < self._motion_boost_until)
-        
-        if is_interaction:
-            target_ms = self._interaction_refresh_ms
-        else:
-            target_ms = self._idle_refresh_ms
-
-        if self.timer.interval() != target_ms:
-            self.timer.setInterval(target_ms)
-        
-        # When active, use minimal delay
-        delay = 0 if is_interaction else 100
-        self.request_refresh(delay)
+        # 固定頻率請求刷新
+        self.request_refresh(0)
         
         # 確保懸浮按鈕位置正確
         if self._is_static_mode and self._stable_frame_count % 10 == 0:
@@ -751,7 +718,12 @@ class OverlayWindow(QMainWindow):
                         dx = max(0, int(round(-self._pan_offset_x)))
                         dy = max(0, int(round(-self._pan_offset_y)))
                         fh, fw = resized_crop.shape[:2]
-                        frame[dy:dy+fh, dx:dx+fw] = resized_crop[:view_h_phys-dy, :view_w_phys-dx]
+                        # 安全複製：確保不超出邊界且形狀匹配
+                        jh = min(fh, view_h_phys - dy)
+                        jw = min(fw, view_w_phys - dx)
+                        if jh > 0 and jw > 0:
+                            frame[dy:dy+jh, dx:dx+jw] = resized_crop[:jh, :jw]
+                        
                         # 更新計算用的灰階影像 (排除 Padding)
                         self._last_gray_frame = cv2.cvtColor(resized_crop, cv2.COLOR_BGR2GRAY)
                     else:
@@ -1020,16 +992,6 @@ class OverlayWindow(QMainWindow):
             return [0.0] * level_count
         return ((counts / total) * 100.0).tolist()
 
-    @staticmethod
-    def _levels_to_wgb(values: list[float]) -> tuple[float, float, float]:
-        n = max(2, len(values))
-        edges = np.linspace(0, n, 4, dtype=np.float64)
-        e1 = int(np.floor(edges[1]))
-        e2 = int(np.floor(edges[2]))
-        black = float(sum(values[:e1]))
-        gray = float(sum(values[e1:e2]))
-        white = float(sum(values[e2:]))
-        return (white, gray, black)
 
     @staticmethod
     def _closest_target_ratios(
@@ -1122,32 +1084,33 @@ class OverlayWindow(QMainWindow):
         pct_not_white = (t_black + t_gray) / t_total if t_gray > 0 else (1.0 - t_white / t_total)
         
         def find_val(p):
-            return int(np.searchsorted(cdf, p))
+            # p 必須在 [0, 1] 之間
+            return int(np.searchsorted(cdf, max(0.0, min(1.0, p))))
 
         guess_min = find_val(pct_black)
         guess_max = find_val(pct_not_white)
         
-        # 確保合理區間
-        guess_min = max(0, min(240, guess_min))
-        guess_max = max(guess_min + 10, min(255, guess_max))
+        # 4. CDF 基於百分比的網格搜尋 (非均勻取樣)
+        # 我們在目標百分比周圍尋找可能的切分點，這會讓搜尋點位自動集中在直方圖密集的區域
+        p_samples = np.linspace(-0.08, 0.08, 9) # 搜尋範圍為 +/- 8% 的人口比例
         
-        # 4. 混合搜尋：在預測值周圍進行局部網格搜尋
+        lo_candidates = sorted(list(set([find_val(pct_black + s) for s in p_samples] + [guess_min])))
+        hi_candidates = sorted(list(set([find_val(pct_not_white + s) for s in p_samples] + [guess_max])))
+        # Exp 搜尋點位 (維持均勻但可選增加)
+        exp_range = np.linspace(-1.5, 1.5, 13)
+
         best_loss = float('inf')
         best_params = (guess_min, guess_max, current_exp)
         levels = max(2, int(self.settings.levels))
-        
-        # 重要：_distribution_from_hist 回傳的是 (Black, Gray, White)
         target_ratios = np.array([t_black, t_gray, t_white]) / t_total
         
-        # 搜尋範圍：Min/Max 周圍各 12 階，Exp 搜尋
-        min_range = range(max(0, guess_min - 12), min(240, guess_min + 12), 4)
-        max_range = range(max(guess_min + 10, guess_max - 12), min(255, guess_max + 12), 4)
-        exp_range = np.linspace(-1.5, 1.5, 13)
-        
-        for lo in min_range:
-            for hi in max_range:
+        for lo in lo_candidates:
+            if lo > 240: continue
+            for hi in hi_candidates:
+                if hi <= lo + 4: continue
+                if hi > 255: continue
+                # 加速：如果這組 lo/hi 離預測太遠則跳過？(目前維持全搜尋以獲取最佳解)
                 for ex in exp_range:
-                    # r_now 為 (Black, Gray, White)
                     r_now = self._distribution_from_hist(hist, lo, hi, levels, float(ex))
                     diff = r_now - target_ratios
                     l = float(np.dot(diff, diff))
@@ -1175,6 +1138,11 @@ class OverlayWindow(QMainWindow):
         total = float(counts.sum())
         if total <= 0:
             return np.zeros(3, dtype=np.float64)
+        
+        if levels == 2:
+            # 特殊處理 n=2：[0]是黑, [1]是白，沒有灰
+            return np.array([counts[0]/total, 0.0, counts[1]/total], dtype=np.float64)
+
         level_edges = np.linspace(0, levels, 4, dtype=np.float64)
         edge1 = int(np.floor(level_edges[1]))
         edge2 = int(np.floor(level_edges[2]))
@@ -1248,7 +1216,6 @@ class OverlayWindow(QMainWindow):
 
     def _start_drag_from_panel(self, global_point: QPoint) -> None:
         self._is_dragging = True
-        self._boost_motion(2.0)
         self._drag_pos = global_point - self.frameGeometry().topLeft()
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
@@ -1293,7 +1260,6 @@ class OverlayWindow(QMainWindow):
                     event.accept()
                     return
             self._is_dragging = True
-            self._boost_motion(2.0)
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
@@ -1316,7 +1282,6 @@ class OverlayWindow(QMainWindow):
             if self._resize_edges & _EDGE_BOTTOM:
                 g.setBottom(max(g.top() + _MIN_HEIGHT - 1, g.bottom() + delta.y()))
             self.setGeometry(g)
-            self._boost_motion(1.0)
             self.request_refresh(0)
             return
 
@@ -1334,7 +1299,6 @@ class OverlayWindow(QMainWindow):
         if self._drag_pos is None:
             return
         self.move(event.globalPosition().toPoint() - self._drag_pos)
-        self._boost_motion(1.0)
         self.request_refresh(0)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
@@ -1347,8 +1311,7 @@ class OverlayWindow(QMainWindow):
         self._pan_drag_start = None
         self._pan_start_offset = None
         self.setCursor(Qt.CursorShape.ArrowCursor)
-        self._boost_motion(1.5)
-        self.request_refresh(20)
+        self.request_refresh(5)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         geom = self.geometry()
@@ -1366,14 +1329,12 @@ class OverlayWindow(QMainWindow):
         super().resizeEvent(event)
         self._layout_panel()
         self._layout_overlay_buttons()
-        self._boost_motion(2.0)
-        self.request_refresh(120)
+        self.request_refresh(20)
 
     def moveEvent(self, event) -> None:  # type: ignore[override]
         super().moveEvent(event)
         self._last_frame_signature = None
-        self._boost_motion(1.5)
-        self.request_refresh(80)
+        self.request_refresh(20)
 
     def wheelEvent(self, event) -> None:  # type: ignore[override]
         if not self._is_static_mode or self._source_image is None:

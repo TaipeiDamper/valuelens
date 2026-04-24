@@ -121,7 +121,7 @@ class ControlPanel(QWidget):
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("gl_panel")
-        self.setFixedHeight(136) # Back to smaller height as it's one row now
+        self.setFixedHeight(136) 
         self.setStyleSheet(_PANEL_STYLE)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
@@ -313,7 +313,6 @@ class ControlPanel(QWidget):
         self.top_row_widget = QWidget()
         self.top_row_widget.setObjectName("gl_top_row_bg")
         self.top_row_widget.setLayout(top_layout)
-        self.setFixedHeight(145) # 稍微增加高度
 
         row2 = QHBoxLayout()
         row2.setContentsMargins(8, 0, 8, 2)
