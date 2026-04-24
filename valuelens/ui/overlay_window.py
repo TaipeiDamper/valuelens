@@ -138,7 +138,10 @@ class OverlayWindow(QMainWindow):
         self._raw_distribution_pct = [0.0] * max(2, int(settings.levels))
         self._last_gray_frame: np.ndarray | None = None
         self._auto_balance_pending = False
+        self._auto_balance_use_current = False
         self._auto_continuous_enabled = False
+        self._remembered_multi_ratio = None # 記憶 3, 5, 8 階
+        self._remembered_two_ratio = None   # 記憶 2 階
         self._last_auto_balance_ts = 0.0
 
         self.timer = QTimer(self)
@@ -160,6 +163,7 @@ class OverlayWindow(QMainWindow):
         self.panel.auto_balance_target_requested.connect(self.on_auto_balance_target_requested)
         self.panel.auto_continuous_toggled.connect(self.on_auto_continuous_toggled)
         self.panel.import_requested.connect(self.open_image_mode)
+        self.panel.screenshot_requested.connect(self.on_screenshot_requested)
         self.panel.image_mode_requested.connect(self.open_image_mode)
         self.panel.quit_requested.connect(self.force_quit)
         self.panel.minimize_requested.connect(self.showMinimized)
@@ -186,6 +190,26 @@ class OverlayWindow(QMainWindow):
             return self._last_raw_bgr_frame
         return None
 
+    def on_screenshot_requested(self) -> None:
+        """擷取當前畫面並存入剪貼簿。"""
+        from PySide6.QtWidgets import QApplication
+        cb = QApplication.clipboard()
+        
+        # 如果是比較模式，我們需要擷取包含原圖與對照圖的完整區域
+        if self._compare_mode:
+            # 擷取整個視窗中除了控制面板以外的部分
+            # 我們可以直接計算包含兩個矩形的範圍
+            lens = self._lens_rect()
+            comp = self._compare_rect()
+            full_rect = lens.united(comp)
+            pix = self.grab(full_rect)
+        else:
+            # 單純擷取量化後的鏡片內容
+            pix = self.grab(self._lens_rect())
+            
+        cb.setPixmap(pix)
+        self._boost_motion(0.5) # 閃爍一下提示成功
+        
     def open_image_mode(self) -> None:
         self.image_mode.set_quantize_settings(
             self.settings.levels,
@@ -205,7 +229,37 @@ class OverlayWindow(QMainWindow):
         self, levels: int, min_value: int, max_value: int, exp_value: float
     ) -> None:
         if self.settings.levels != levels:
+            old_lvl = self.settings.levels
+            new_lvl = levels
+            
+            was_multi = old_lvl in (3, 5, 8)
+            is_multi = new_lvl in (3, 5, 8)
+            was_two = (old_lvl == 2)
+            is_two = (new_lvl == 2)
+            
+            # --- 記憶目前的比例 ---
+            if was_multi:
+                self._remembered_multi_ratio = self.panel.balance_presets.currentData()
+            elif was_two:
+                self._remembered_two_ratio = self.panel.balance_presets.currentData()
+                
+            # --- 決定載回哪一組記憶 ---
             self._auto_balance_pending = True
+            if is_multi and self._remembered_multi_ratio:
+                # 恢復多階層記憶
+                self.panel.set_balance_preset(self._remembered_multi_ratio)
+                self._auto_balance_use_current = True
+            elif is_two and self._remembered_two_ratio:
+                # 恢復 2 階記憶
+                self.panel.set_balance_preset(self._remembered_two_ratio)
+                self._auto_balance_use_current = True
+            elif was_multi and is_multi:
+                # 在 3, 5, 8 之間切換，且沒有記憶（雖然通常會有）
+                self._auto_balance_use_current = True
+            else:
+                # 其他情況（例如第一次進入），執行全域最佳
+                self._auto_balance_use_current = False
+            
         self.settings.levels = levels
         self.settings.min_value = min_value
         self.settings.max_value = max_value
@@ -220,7 +274,9 @@ class OverlayWindow(QMainWindow):
         self._raw_distribution_pct = [0.0] * max(2, int(levels))
         self._last_frame_signature = None
         self._boost_motion(1.0)
-        self.request_refresh(16)
+        # 如果不是自動平衡觸發的，我們請求一次刷新
+        if not self._is_refreshing:
+            self.request_refresh(16)
 
     def on_display_settings_changed(self, min_value: int, max_value: int, exp_value: float) -> None:
         self.settings.display_min_value = min_value
@@ -275,11 +331,32 @@ class OverlayWindow(QMainWindow):
         self.settings.hotkey = hotkey
         self.hotkeys.register("toggle", hotkey, self.toggle_enabled)
 
+    def _apply_balance_to_ui(self, lower: int, upper: int, exp_value: float) -> None:
+        """統一將平衡參數套用到所有 UI 組件，不觸發循環信號。"""
+        self.panel.exp_slider.blockSignals(True)
+        self.panel.range_slider.blockSignals(True)
+        
+        self.panel.exp_slider.setValue(int(round(-exp_value * 100.0)))
+        self.panel.range_slider.set_values(lower, upper)
+        
+        self.panel.exp_slider.blockSignals(False)
+        self.panel.range_slider.blockSignals(False)
+        
+        # 同步更新本地與圖片模式設定
+        self.settings.min_value = lower
+        self.settings.max_value = upper
+        self.settings.exp_value = exp_value
+        self.image_mode.set_quantize_settings(
+            self.settings.levels, lower, upper, exp_value,
+            self.settings.blur_enabled, self.settings.blur_radius,
+            self.settings.dither_enabled, self.settings.dither_strength,
+            getattr(self.settings, 'dither_first', False)
+        )
+
     def on_auto_balance_target_requested(self, ratios: tuple[float, float, float]) -> None:
         if self._last_gray_frame is None or self._last_gray_frame.size == 0:
             return
             
-        # ratios 為 (White, Gray, Black)
         lower, upper, exp_value = self._optimize_balance_params(
             self._last_gray_frame,
             ratios,
@@ -288,7 +365,6 @@ class OverlayWindow(QMainWindow):
             self.settings.exp_value,
         )
         
-        # 只要有變動就更新 UI，且「不」阻斷信號，讓系統能偵測到變更並刷新
         changed = (
             abs(lower - self.settings.min_value) >= 1 or
             abs(upper - self.settings.max_value) >= 1 or
@@ -296,20 +372,18 @@ class OverlayWindow(QMainWindow):
         )
         
         if changed:
-            # 這裡不使用 blockSignals，以便觸發 refresh_frame
-            self.panel.exp_slider.setValue(int(round(-exp_value * 100.0)))
-            self.panel.range_slider.set_values(lower, upper)
-            
-            self.settings.min_value = lower
-            self.settings.max_value = upper
-            self.settings.exp_value = exp_value
+            self._apply_balance_to_ui(lower, upper, exp_value)
+            self._last_frame_signature = None
             
         self._boost_motion(1.0)
-        self.request_refresh()
+        self.refresh_frame()
+        self.update()
 
     def on_auto_continuous_toggled(self, enabled: bool) -> None:
         self._auto_continuous_enabled = enabled
+        self._auto_balance_pending = False # 清除任何待處理的平衡請求
         if enabled:
+            self._last_auto_balance_ts = 0.0 # 立即執行一次
             self.request_refresh()
 
     def on_auto_balance_raw_requested(self) -> None:
@@ -514,7 +588,16 @@ class OverlayWindow(QMainWindow):
             # 如果有待處理的自動平衡（剛切換階層），在此執行
             if self._auto_balance_pending:
                 self._auto_balance_pending = False
-                self.on_auto_balance_raw_requested()
+                if self._auto_balance_use_current:
+                    # 維持當前選定的比例
+                    target = self.panel.balance_presets.currentData()
+                    if target:
+                        self.on_auto_balance_target_requested(target)
+                    else:
+                        self.on_auto_balance_raw_requested()
+                else:
+                    # 執行全域最佳平衡
+                    self.on_auto_balance_raw_requested()
             elif self._auto_continuous_enabled:
                 # 持續模式：降頻執行 (例如 150ms 一次)
                 now = time.monotonic()

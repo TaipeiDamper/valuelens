@@ -104,6 +104,7 @@ class ControlPanel(QWidget):
     hotkey_changed = Signal(str)
     image_mode_requested = Signal()
     import_requested = Signal()
+    screenshot_requested = Signal()
     quit_requested = Signal()
     minimize_requested = Signal()
     drag_started = Signal(object)
@@ -191,6 +192,11 @@ class ControlPanel(QWidget):
         self.import_btn.setToolTip("鎖定當下畫面 (作為參考圖)")
         self.import_btn.clicked.connect(self.import_requested.emit)
 
+        self.screenshot_btn = QToolButton()
+        self.screenshot_btn.setText("📋")
+        self.screenshot_btn.setToolTip("截圖至剪貼簿 (Copy to Clipboard)")
+        self.screenshot_btn.clicked.connect(self.screenshot_requested.emit)
+
         self.balance_raw_btn = QToolButton()
         self.balance_raw_btn.setText("重新平衡")
         self.balance_raw_btn.setToolTip("根據目前畫面分佈，自動切換至最接近的預設比例並套用 (會關閉自動追蹤)")
@@ -254,6 +260,7 @@ class ControlPanel(QWidget):
         top_layout.addWidget(self.auto_continuous_check)
         top_layout.addWidget(self.balance_raw_btn)
         top_layout.addWidget(self.import_btn)
+        top_layout.addWidget(self.screenshot_btn)
         top_layout.addStretch(1)
         top_layout.addWidget(self.collapse_btn)
         top_layout.addWidget(self.more_btn)
