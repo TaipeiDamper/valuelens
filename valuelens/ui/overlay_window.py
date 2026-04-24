@@ -137,6 +137,9 @@ class OverlayWindow(QMainWindow):
         self._processed_distribution_pct = [0.0] * max(2, int(settings.levels))
         self._raw_distribution_pct = [0.0] * max(2, int(settings.levels))
         self._last_gray_frame: np.ndarray | None = None
+        self._auto_balance_pending = False
+        self._auto_continuous_enabled = False
+        self._last_auto_balance_ts = 0.0
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._on_timer_tick)
@@ -155,6 +158,8 @@ class OverlayWindow(QMainWindow):
         self.panel.hotkey_changed.connect(self.on_hotkey_changed)
         self.panel.auto_balance_raw_requested.connect(self.on_auto_balance_raw_requested)
         self.panel.auto_balance_target_requested.connect(self.on_auto_balance_target_requested)
+        self.panel.auto_continuous_toggled.connect(self.on_auto_continuous_toggled)
+        self.panel.import_requested.connect(self.open_image_mode)
         self.panel.image_mode_requested.connect(self.open_image_mode)
         self.panel.quit_requested.connect(self.force_quit)
         self.panel.minimize_requested.connect(self.showMinimized)
@@ -199,6 +204,8 @@ class OverlayWindow(QMainWindow):
     def on_settings_changed(
         self, levels: int, min_value: int, max_value: int, exp_value: float
     ) -> None:
+        if self.settings.levels != levels:
+            self._auto_balance_pending = True
         self.settings.levels = levels
         self.settings.min_value = min_value
         self.settings.max_value = max_value
@@ -271,21 +278,46 @@ class OverlayWindow(QMainWindow):
     def on_auto_balance_target_requested(self, ratios: tuple[float, float, float]) -> None:
         if self._last_gray_frame is None or self._last_gray_frame.size == 0:
             return
-        # UI preset order is white:gray:black, optimizer expects black:gray:white.
-        target = (ratios[2], ratios[1], ratios[0])
+            
+        # ratios 為 (White, Gray, Black)
         lower, upper, exp_value = self._optimize_balance_params(
             self._last_gray_frame,
-            target,
+            ratios,
             self.settings.min_value,
             self.settings.max_value,
             self.settings.exp_value,
         )
-        self.panel.exp_slider.setValue(int(round(-exp_value * 100.0)))
-        self.panel.range_slider.set_values(lower, upper)
+        
+        # 只要有變動就更新 UI，且「不」阻斷信號，讓系統能偵測到變更並刷新
+        changed = (
+            abs(lower - self.settings.min_value) >= 1 or
+            abs(upper - self.settings.max_value) >= 1 or
+            abs(exp_value - self.settings.exp_value) > 0.01
+        )
+        
+        if changed:
+            # 這裡不使用 blockSignals，以便觸發 refresh_frame
+            self.panel.exp_slider.setValue(int(round(-exp_value * 100.0)))
+            self.panel.range_slider.set_values(lower, upper)
+            
+            self.settings.min_value = lower
+            self.settings.max_value = upper
+            self.settings.exp_value = exp_value
+            
         self._boost_motion(1.0)
         self.request_refresh()
 
+    def on_auto_continuous_toggled(self, enabled: bool) -> None:
+        self._auto_continuous_enabled = enabled
+        if enabled:
+            self.request_refresh()
+
     def on_auto_balance_raw_requested(self) -> None:
+        # 點擊重新平衡時，關閉持續模式
+        if self._auto_continuous_enabled:
+            self._auto_continuous_enabled = False
+            self.panel.auto_continuous_check.setChecked(False)
+
         raw_wgb = self._levels_to_wgb(self._raw_distribution_pct)
         target_wgb = self.panel.nearest_balance_preset(raw_wgb)
         self.panel.set_balance_preset(target_wgb, mark_best=True)
@@ -445,29 +477,52 @@ class OverlayWindow(QMainWindow):
                 dither_first=getattr(self.settings, 'dither_first', False),
             )
             h, w = logic_quantized.shape[:2]
-            # Create QImage directly from grayscale numpy array to save multiple color conversions
+            # 保留 ndarray 引用防止 GC
+            self._frame_array = logic_quantized
             qimg = QImage(
-                logic_quantized.data, w, h, logic_quantized.strides[0], QImage.Format.Format_Grayscale8
-            ).copy()
+                logic_quantized.data, w, h,
+                logic_quantized.strides[0],
+                QImage.Format.Format_Grayscale8,
+            )
             qimg.setDevicePixelRatio(dpr)
             self._frame = QPixmap.fromImage(qimg)
             self._update_distributions(self._last_gray_frame, logic_indices)
             if self._compare_mode:
                 if self.settings.compare_bw:
+                    self._raw_frame_array = self._last_gray_frame
                     raw_qimg = QImage(
-                        self._last_gray_frame.data, w, h, self._last_gray_frame.strides[0], QImage.Format.Format_Grayscale8
-                    ).copy()
+                        self._last_gray_frame.data, w, h,
+                        self._last_gray_frame.strides[0],
+                        QImage.Format.Format_Grayscale8,
+                    )
                 else:
                     raw_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    self._raw_frame_array = raw_rgb
                     raw_qimg = QImage(
-                        raw_rgb.data, w, h, raw_rgb.strides[0], QImage.Format.Format_RGB888
-                    ).copy()
+                        raw_rgb.data, w, h,
+                        raw_rgb.strides[0],
+                        QImage.Format.Format_RGB888,
+                    )
                 raw_qimg.setDevicePixelRatio(dpr)
                 self._raw_frame = QPixmap.fromImage(raw_qimg)
                 self.update(self.rect())
             else:
                 self._raw_frame = QPixmap()
+                self._raw_frame_array = None
                 self.update(lens)
+
+            # 如果有待處理的自動平衡（剛切換階層），在此執行
+            if self._auto_balance_pending:
+                self._auto_balance_pending = False
+                self.on_auto_balance_raw_requested()
+            elif self._auto_continuous_enabled:
+                # 持續模式：降頻執行 (例如 150ms 一次)
+                now = time.monotonic()
+                if now - self._last_auto_balance_ts > 0.15:
+                    self._last_auto_balance_ts = now
+                    current_target = self.panel.balance_presets.currentData()
+                    if current_target:
+                        self.on_auto_balance_target_requested(current_target)
         finally:
             self._is_refreshing = False
 
@@ -567,94 +622,121 @@ class OverlayWindow(QMainWindow):
             key=lambda cand: sum((float(cand[i]) - float(current[i])) ** 2 for i in range(3)),
         )
 
+    @staticmethod
+    def _levels_to_wgb(values: list[float]) -> tuple[float, float, float]:
+        """將 N 階層分佈折疊為 (white%, gray%, black%)。
+
+        重要：
+        - 根據使用者規則，此處 index 0 必須是最白 (White)，index n-1 必須是最黑 (Black)。
+        - 由於 quantize 輸出是 0=黑，因此我們在此先做 reversed。
+        """
+        # 反轉數據，使 v[0]=最白, v[n-1]=最黑
+        v = list(reversed(values))
+        n = len(v)
+
+        def _s(*idx):
+            """加總指定 index 的百分比。"""
+            return float(sum(v[i] for i in idx if 0 <= i < n))
+
+        def _best_dist(wgb, target_base):
+            """計算 wgb 與目標比例（如 0.7, 0.2, 0.1）所有排列的最小距離。"""
+            total = sum(wgb) or 1.0
+            norm = [val / total for val in wgb]
+            t_total = sum(target_base)
+            tn = [val / t_total for val in target_base]
+            best = float("inf")
+            for p in itertools.permutations(tn):
+                d = sum((norm[i] - p[i])**2 for i in range(3))
+                if d < best:
+                    best = d
+            return best
+
+        if n == 2:
+            # 二分法：白=[0], 黑=[1]。基準比例 3:7 (0.3, 0.7)
+            return (_s(0), 0.0, _s(1))
+
+        if n == 3:
+            # 三分法：白=[0], 灰=[1], 黑=[2]。基準比例 7:2:1
+            return (_s(0), _s(1), _s(2))
+
+        if n == 5:
+            # 方案 A: [0,1]|[2,3]|[4] ; 方案 B: [0]|[1,2]|[3,4]
+            target = (0.7, 0.2, 0.1)
+            a = (_s(0, 1), _s(2, 3), _s(4))
+            b = (_s(0),    _s(1, 2), _s(3, 4))
+            return a if _best_dist(a, target) <= _best_dist(b, target) else b
+
+        if n == 8:
+            # 方案 A: [0,1]|[2,3,4]|[5,6,7] ; 方案 B: [0,1,2]|[3,4,5]|[6,7]
+            target = (0.7, 0.2, 0.1)
+            a = (_s(0, 1),    _s(2, 3, 4), _s(5, 6, 7))
+            b = (_s(0, 1, 2), _s(3, 4, 5), _s(6, 7))
+            return a if _best_dist(a, target) <= _best_dist(b, target) else b
+
+        # 其他 n 值：均等三分
+        edges = np.linspace(0, n, 4, dtype=np.float64)
+        e1, e2 = int(np.floor(edges[1])), int(np.floor(edges[2]))
+        return (_s(*range(0, e1)), _s(*range(e1, e2)), _s(*range(e2, n)))
+
     def _optimize_balance_params(
         self,
         gray: np.ndarray,
-        target: tuple[float, float, float],
+        target: tuple[float, float, float], # (White, Gray, Black)
         current_min: int,
         current_max: int,
         current_exp: float,
     ) -> tuple[int, int, float]:
+        # 1. 取得直方圖
         hist = np.bincount(gray.reshape(-1).astype(np.uint8), minlength=256).astype(np.float64)
         total = float(hist.sum())
-        if total <= 0:
-            return current_min, current_max, current_exp
+        if total <= 0: return current_min, current_max, current_exp
 
-        target_total = float(sum(target))
-        if target_total <= 0:
-            return current_min, current_max, current_exp
-        target_ratios = np.array([v / target_total for v in target], dtype=np.float64)
+        # 2. 計算 CDF (累積分布)
+        cdf = np.cumsum(hist) / total
+        
+        t_white, t_gray, t_black = target
+        t_total = t_white + t_gray + t_black
+        if t_total <= 0: return current_min, current_max, current_exp
+        
+        # 3. 百分位數預測 (直方圖 0=黑, 255=白)
+        pct_black = t_black / t_total
+        pct_not_white = (t_black + t_gray) / t_total if t_gray > 0 else (1.0 - t_white / t_total)
+        
+        def find_val(p):
+            return int(np.searchsorted(cdf, p))
+
+        guess_min = find_val(pct_black)
+        guess_max = find_val(pct_not_white)
+        
+        # 確保合理區間
+        guess_min = max(0, min(240, guess_min))
+        guess_max = max(guess_min + 10, min(255, guess_max))
+        
+        # 4. 混合搜尋：在預測值周圍進行局部網格搜尋
+        best_loss = float('inf')
+        best_params = (guess_min, guess_max, current_exp)
         levels = max(2, int(self.settings.levels))
-
-        def project(params: np.ndarray) -> np.ndarray:
-            lo = float(np.clip(params[0], 0.0, 254.0))
-            hi = float(np.clip(params[1], lo + 1.0, 255.0))
-            exp = float(np.clip(params[2], -2.0, 2.0))
-            return np.array([lo, hi, exp], dtype=np.float64)
-
-        def loss(params: np.ndarray) -> float:
-            p = project(params)
-            ratios_now = self._distribution_from_hist(
-                hist,
-                int(round(p[0])),
-                int(round(p[1])),
-                levels,
-                float(p[2]),
-            )
-            diff = ratios_now - target_ratios
-            return float(np.dot(diff, diff))
-
-        best_loss = float("inf")
-        best = np.array([current_min, current_max, current_exp], dtype=np.float64)
-        for lo, hi in _RANGE_PRESETS:
-            for exp in _EXP_PRESETS:
-                cand = project(np.array([lo, hi, exp], dtype=np.float64))
-                cand_loss = loss(cand)
-                if cand_loss < best_loss:
-                    best_loss = cand_loss
-                    best = cand
-
-        # Broaden search with coarse grid so balance has visible effect.
-        for lo in range(0, 255, 16):
-            for hi in range(lo + 8, 256, 8):
-                for exp in _EXP_COARSE_GRID:
-                    cand = project(np.array([lo, hi, exp], dtype=np.float64))
-                    cand_loss = loss(cand)
-                    if cand_loss < best_loss:
-                        best_loss = cand_loss
-                        best = cand
-
-        x = best.copy()
-        steps = np.array([2.0, 2.0, 0.06], dtype=np.float64)
-        for _ in range(10):
-            base = loss(x)
-            grad = np.zeros(3, dtype=np.float64)
-            hdiag = np.zeros(3, dtype=np.float64)
-            for i in range(3):
-                d = np.zeros(3, dtype=np.float64)
-                d[i] = steps[i]
-                fp = loss(project(x + d))
-                fm = loss(project(x - d))
-                grad[i] = (fp - fm) / (2.0 * steps[i])
-                hdiag[i] = (fp - 2.0 * base + fm) / (steps[i] * steps[i])
-
-            denom = np.abs(hdiag) + 1e-4
-            step_vec = grad / denom
-            improved = False
-            for alpha in (1.0, 0.5, 0.25, 0.1):
-                cand = project(x - alpha * step_vec)
-                cand_loss = loss(cand)
-                if cand_loss + 1e-10 < base:
-                    x = cand
-                    improved = True
-                    break
-            if not improved:
-                break
-            if np.linalg.norm(step_vec) < 0.25:
-                break
-
-        out = project(x)
-        return int(round(out[0])), int(round(out[1])), float(out[2])
+        
+        # 重要：_distribution_from_hist 回傳的是 (Black, Gray, White)
+        target_ratios = np.array([t_black, t_gray, t_white]) / t_total
+        
+        # 搜尋範圍：Min/Max 周圍各 12 階，Exp 搜尋
+        min_range = range(max(0, guess_min - 12), min(240, guess_min + 12), 4)
+        max_range = range(max(guess_min + 10, guess_max - 12), min(255, guess_max + 12), 4)
+        exp_range = np.linspace(-1.5, 1.5, 13)
+        
+        for lo in min_range:
+            for hi in max_range:
+                for ex in exp_range:
+                    # r_now 為 (Black, Gray, White)
+                    r_now = self._distribution_from_hist(hist, lo, hi, levels, float(ex))
+                    diff = r_now - target_ratios
+                    l = float(np.dot(diff, diff))
+                    if l < best_loss:
+                        best_loss = l
+                        best_params = (lo, hi, float(ex))
+                        
+        return best_params
 
     @staticmethod
     def _distribution_from_hist(
@@ -839,5 +921,7 @@ class OverlayWindow(QMainWindow):
             self.force_quit()
             return
         super().keyPressEvent(event)
+
+
 
 

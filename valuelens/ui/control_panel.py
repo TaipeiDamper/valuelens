@@ -21,14 +21,10 @@ from valuelens.config.settings import AppSettings
 
 
 _LEVEL_PRESETS = [2, 3, 5, 8]
-_BALANCE_PRESETS: list[tuple[float, float, float]] = [
-    (10.0, 20.0, 70.0),
-    (10.0, 70.0, 20.0),
-    (20.0, 10.0, 70.0),
-    (20.0, 70.0, 10.0),
-    (70.0, 10.0, 20.0),
-    (70.0, 20.0, 10.0),
-]
+
+# 核心比例定義
+_RATIO_2 = (30.0, 0.0, 70.0)    # n=2 時使用 3:7 (無灰色)
+_RATIO_3PLUS = (70.0, 20.0, 10.0) # n>=3 時使用 7:2:1
 
 _PANEL_STYLE = """
 QWidget#gl_panel { background: #1e1e22; color: #e0e0e0; border-top: 4px solid #3d89ff; }
@@ -107,11 +103,13 @@ class ControlPanel(QWidget):
     compare_mode_changed = Signal(bool)
     hotkey_changed = Signal(str)
     image_mode_requested = Signal()
+    import_requested = Signal()
     quit_requested = Signal()
     minimize_requested = Signal()
     drag_started = Signal(object)
     auto_balance_raw_requested = Signal()
     auto_balance_target_requested = Signal(tuple)
+    auto_continuous_toggled = Signal(bool)
 
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
@@ -188,14 +186,21 @@ class ControlPanel(QWidget):
         self.close_btn.setFixedWidth(34)
         self.close_btn.setStyleSheet("QToolButton { border: none; padding: 0; font-weight: bold; }")
 
+        self.import_btn = QToolButton()
+        self.import_btn.setText("📷")
+        self.import_btn.setToolTip("鎖定當下畫面 (作為參考圖)")
+        self.import_btn.clicked.connect(self.import_requested.emit)
+
         self.balance_raw_btn = QToolButton()
-        self.balance_raw_btn.setText("自動平衡")
-        self.balance_raw_btn.setToolTip("根據目前畫面分佈，自動切換至最接近的預設比例並套用")
+        self.balance_raw_btn.setText("重新平衡")
+        self.balance_raw_btn.setToolTip("根據目前畫面分佈，自動切換至最接近的預設比例並套用 (會關閉自動追蹤)")
+
+        self.auto_continuous_check = QCheckBox("自動平衡")
+        self.auto_continuous_check.setToolTip("開啟後會不斷自動調整參數，鎖定目前選擇的比例")
+        self.auto_continuous_check.setChecked(False)
 
         self.balance_presets = QComboBox()
-        for i, (white, gray, black) in enumerate(_BALANCE_PRESETS):
-            name = f"{int(white)}:{int(gray)}:{int(black)}"
-            self.balance_presets.addItem(name, (white, gray, black))
+        self._update_balance_presets(settings.levels)
         self.balance_presets.setFixedWidth(100)
         self.balance_presets.setToolTip("平衡預設比例")
 
@@ -246,7 +251,9 @@ class ControlPanel(QWidget):
         top_layout.addWidget(self.enabled_check)
         top_layout.addSpacing(4)
         top_layout.addWidget(self.balance_presets)
+        top_layout.addWidget(self.auto_continuous_check)
         top_layout.addWidget(self.balance_raw_btn)
+        top_layout.addWidget(self.import_btn)
         top_layout.addStretch(1)
         top_layout.addWidget(self.collapse_btn)
         top_layout.addWidget(self.more_btn)
@@ -257,6 +264,7 @@ class ControlPanel(QWidget):
         self.top_row_widget = QWidget()
         self.top_row_widget.setObjectName("gl_top_row_bg")
         self.top_row_widget.setLayout(top_layout)
+        self.setFixedHeight(145) # 稍微增加高度
 
         row2 = QHBoxLayout()
         row2.setContentsMargins(8, 0, 8, 2)
@@ -302,7 +310,7 @@ class ControlPanel(QWidget):
         layout.addWidget(self.top_row_widget)
         layout.addWidget(self.extra_container)
 
-        self.levels.currentIndexChanged.connect(self._emit_settings)
+        self.levels.currentIndexChanged.connect(self._on_levels_changed)
         self.enabled_check.toggled.connect(self.compare_mode_changed.emit)
         self.range_slider.range_changed.connect(self._on_range_change)
         self.exp_slider.valueChanged.connect(self._emit_settings)
@@ -319,6 +327,7 @@ class ControlPanel(QWidget):
         self.close_btn.clicked.connect(self.quit_requested.emit)
         self.balance_presets.currentIndexChanged.connect(self._request_target_auto_balance)
         self.balance_raw_btn.clicked.connect(self._request_raw_auto_balance)
+        self.auto_continuous_check.toggled.connect(self.auto_continuous_toggled.emit)
         self.logic_reset_btn.clicked.connect(self._reset_logic_settings)
         self.display_reset_btn.clicked.connect(self._reset_display_settings)
 
@@ -332,6 +341,11 @@ class ControlPanel(QWidget):
             self.setFixedHeight(136)
             self.collapse_btn.setText("▲")
         self.collapse_toggled.emit(checked)
+
+    def _on_levels_changed(self, index: int) -> None:
+        lvl = _LEVEL_PRESETS[index]
+        self._update_balance_presets(lvl)
+        self._emit_settings()
 
     def _current_levels(self) -> int:
         data = self.levels.currentData()
@@ -399,31 +413,67 @@ class ControlPanel(QWidget):
     def _request_raw_auto_balance(self) -> None:
         self.auto_balance_raw_requested.emit()
 
+    def _update_balance_presets(self, n: int) -> None:
+        """根據目前階層動態更新平衡預設選項。"""
+        import itertools
+        self.balance_presets.blockSignals(True)
+        current_data = self.balance_presets.currentData()
+        self.balance_presets.clear()
+
+        if n == 2:
+            base = (30.0, 0.0, 70.0)
+            # n=2 時，我們只想要 (30,0,70) 和 (70,0,30) 這種灰色為 0 的排列
+            presets = [(70.0, 0.0, 30.0), (30.0, 0.0, 70.0)]
+        else:
+            base = (70.0, 20.0, 10.0)
+            # n>=3 時，取得所有 6 種排列組合
+            presets = sorted(list(set(itertools.permutations(base))), reverse=True)
+        
+        for w, g, b in presets:
+            if n == 2:
+                name = f"{int(w)}:0:{int(b)}"
+            else:
+                name = f"{int(w)}:{int(g)}:{int(b)}"
+            self.balance_presets.addItem(name, (w, g, b))
+
+        # 嘗試恢復之前選取的索引
+        idx = self.balance_presets.findData(current_data)
+        if idx >= 0:
+            self.balance_presets.setCurrentIndex(idx)
+        else:
+            self.balance_presets.setCurrentIndex(0)
+        self.balance_presets.blockSignals(False)
+
     def set_balance_preset(self, ratio_wgb: tuple[float, float, float], mark_best: bool = False) -> None:
         best_idx = 0
         best_dist = float("inf")
-        for idx, preset in enumerate(_BALANCE_PRESETS):
-            dist = sum((preset[i] - ratio_wgb[i]) ** 2 for i in range(3))
+        # 從 ComboBox 中遍歷所有選項，找出最接近的
+        for i in range(self.balance_presets.count()):
+            preset = self.balance_presets.itemData(i)
+            if preset is None: continue
+            dist = sum((preset[j] - ratio_wgb[j]) ** 2 for j in range(3))
             if dist < best_dist:
                 best_dist = dist
-                best_idx = idx
+                best_idx = i
 
         self.balance_presets.blockSignals(True)
         self.balance_presets.setCurrentIndex(best_idx)
         self.balance_presets.blockSignals(False)
-        
-        # We can visually mark the "best" item in the combo box list if needed
-        # but for now, simple selection is much cleaner for the UI.
 
     def nearest_balance_preset(self, ratio_wgb: tuple[float, float, float]) -> tuple[float, float, float]:
         best_idx = 0
         best_dist = float("inf")
-        for idx, preset in enumerate(_BALANCE_PRESETS):
-            dist = sum((preset[i] - ratio_wgb[i]) ** 2 for i in range(3))
+        best_preset = (70.0, 20.0, 10.0)
+        
+        for i in range(self.balance_presets.count()):
+            preset = self.balance_presets.itemData(i)
+            if preset is None: continue
+            dist = sum((preset[j] - ratio_wgb[j]) ** 2 for j in range(3))
             if dist < best_dist:
                 best_dist = dist
-                best_idx = idx
-        return _BALANCE_PRESETS[best_idx]
+                best_idx = i
+                best_preset = preset
+        return best_preset
 
     def _reset_logic_settings(self) -> None:
         self.range_slider.set_values(0, 255)
