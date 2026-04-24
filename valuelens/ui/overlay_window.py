@@ -145,7 +145,16 @@ class OverlayWindow(QMainWindow):
         self._is_frozen = False             # 是否處於凍結模式
         self._frozen_frame = None           # 凍結的原始影像
         self._show_distribution = True      # 是否顯示灰階比例
+        self._bypass_mode = False           # Bypass: 跳過所有處理
+        self._is_image_mode = False         # 是否處於圖片模式
+        self._source_image = None           # 圖片模式：完整原始圖 (BGR)
+        self._full_image_gray = None        # 圖片模式：整張圖的灰階快取
+        self._pan_offset_x = 0             # 圖片平移 X 偏移
+        self._pan_offset_y = 0             # 圖片平移 Y 偏移
+        self._pan_drag_start = None        # 平移拖曳起始點
+        self._pan_start_offset = None      # 平移拖曳起始偏移
         self._last_auto_balance_ts = 0.0
+        self._last_raw_bgr_frame = None
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._on_timer_tick)
@@ -169,6 +178,7 @@ class OverlayWindow(QMainWindow):
         self.panel.screenshot_requested.connect(self.on_screenshot_requested)
         self.panel.image_mode_requested.connect(self.open_image_mode)
         self.panel.distribution_toggled.connect(self.on_distribution_toggled)
+        self.panel.bypass_toggled.connect(self.on_bypass_toggled)
         self.panel.quit_requested.connect(self.force_quit)
         self.panel.minimize_requested.connect(self.showMinimized)
         self.panel.drag_started.connect(self._start_drag_from_panel)
@@ -187,6 +197,10 @@ class OverlayWindow(QMainWindow):
 
         self.hotkeys.register("toggle", self.settings.hotkey, self.toggle_enabled)
         self.hotkeys.register("quit", "ctrl+alt+shift+q", self.force_quit)
+
+        # 拖放支援
+        self.setAcceptDrops(True)
+
         self.request_refresh()
 
     def _get_current_raw_frame(self) -> np.ndarray | None:
@@ -199,12 +213,20 @@ class OverlayWindow(QMainWindow):
         self._show_distribution = show
         self.update()
 
+    def on_bypass_toggled(self, bypass: bool) -> None:
+        """切換 Bypass 模式：跳過所有處理，顯示原始影像。"""
+        self._bypass_mode = bypass
+        self._last_frame_signature = None
+        self._boost_motion(0.5)
+        self.refresh_frame()
+        self.update()
+
     def on_screenshot_requested(self) -> None:
         """擷取當前畫面並存入剪貼簿。"""
         from PySide6.QtWidgets import QApplication
         cb = QApplication.clipboard()
         
-        # 如果是比較模式，我們需要擷取包含原圖與對照圖的完整區域
+        # 擷取可見的鏡片區域（包含對照圖）
         if self._compare_mode:
             lens = self._lens_rect()
             comp = self._compare_rect()
@@ -217,18 +239,24 @@ class OverlayWindow(QMainWindow):
         self._boost_motion(0.5) 
 
     def toggle_freeze_mode(self) -> None:
-        """切換凍結模式：鎖定當前畫面或恢復即時擷取。"""
-        print(f"[Freeze] toggle called, currently frozen={self._is_frozen}")
-        if self._is_frozen:
-            # 恢復即時模式
+        """切換凍結模式：鎖定當前畫面或恢復即時擷取。同時處理 ImageMode 釋放。"""
+        print(f"[Freeze] toggle called, frozen={self._is_frozen}, image_mode={self._is_image_mode}")
+        if self._is_frozen or self._is_image_mode:
+            # 恢復即時模式（同時退出 ImageMode）
             self._is_frozen = False
+            self._is_image_mode = False
             self._frozen_frame = None
-            self.panel.freeze_btn.setStyleSheet("") 
+            self._source_image = None
+            self._full_image_gray = None
+            self._pan_offset_x = 0
+            self._pan_offset_y = 0
+            self.panel.freeze_btn.setProperty("freeze_mode", "")
+            self.panel.freeze_btn.style().unpolish(self.panel.freeze_btn)
+            self.panel.freeze_btn.style().polish(self.panel.freeze_btn)
             self.panel.freeze_btn.setToolTip("鎖定當下畫面 (就地凍結)")
-            print("[Freeze] UNFROZEN")
+            print("[Freeze] UNFROZEN / ImageMode EXIT")
         else:
             # 擷取整個視窗背後的影像（包含工具列後面的區域）
-            # 這樣收合面板時，會有更大範圍的影像可以使用
             dpr = self.devicePixelRatioF()
             phys = self._physical_window_rect()
             if phys is not None:
@@ -238,7 +266,6 @@ class OverlayWindow(QMainWindow):
                     exclude_hwnd=self._hwnd()
                 )
             else:
-                # 備用：只擷取鏡片區域
                 frame = self._last_raw_bgr_frame
                 if frame is None:
                     rect = self._lens_rect()
@@ -250,51 +277,75 @@ class OverlayWindow(QMainWindow):
             if frame is not None:
                 self._is_frozen = True
                 self._frozen_frame = frame.copy()
-                self.panel.freeze_btn.setStyleSheet("background-color: #0078d7; color: white; border: 1px solid white;")
+                self.panel.freeze_btn.setProperty("freeze_mode", "frozen")
+                self.panel.freeze_btn.style().unpolish(self.panel.freeze_btn)
+                self.panel.freeze_btn.style().polish(self.panel.freeze_btn)
                 self.panel.freeze_btn.setToolTip("點擊解除鎖定 (目前已凍結)")
                 print(f"[Freeze] FROZEN, frame shape={frame.shape}")
             else:
                 print("[Freeze] FAILED - no frame available")
         
         self._last_frame_signature = None
-        self._is_refreshing = False  # 強制解鎖刷新
+        self._is_refreshing = False
+        self.refresh_frame()
+        self.update()
+
+    def import_image(self, bgr_image: np.ndarray) -> None:
+        """匯入外部圖片，進入 ImageMode。"""
+        self._source_image = bgr_image.copy()
+        self._full_image_gray = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY)
+        self._is_image_mode = True
+        self._is_frozen = True
+        self._frozen_frame = None  # ImageMode 不使用 frozen_frame
+        self._pan_offset_x = 0
+        self._pan_offset_y = 0
+        self.panel.freeze_btn.setProperty("freeze_mode", "image")
+        self.panel.freeze_btn.style().unpolish(self.panel.freeze_btn)
+        self.panel.freeze_btn.style().polish(self.panel.freeze_btn)
+        self.panel.freeze_btn.setToolTip("點擊退出圖片模式")
+        self._last_frame_signature = None
+        self._is_refreshing = False
+        print(f"[ImageMode] Imported image: {bgr_image.shape}")
         self.refresh_frame()
         self.update()
 
     def open_image_mode(self) -> None:
-        """開啟圖片模式對話框。"""
-        self.image_mode.set_quantize_settings(
-            self.settings.levels,
-            self.settings.min_value,
-            self.settings.max_value,
-            self.settings.exp_value,
-            self.settings.blur_enabled,
-            self.settings.blur_radius,
-            self.settings.dither_enabled,
-            self.settings.dither_strength,
-            getattr(self.settings, 'dither_first', False),
+        """開啟檔案選擇器匯入圖片。"""
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "選擇圖片", "", "Images (*.png *.jpg *.jpeg *.bmp *.webp)"
         )
-        # 如果是對照模式，擷取包含兩側的完整並排畫面
-        if self._compare_mode:
-            lens = self._lens_rect()
-            comp = self._compare_rect()
-            full_rect = lens.united(comp)
-            pix = self.grab(full_rect)
-            # QPixmap → numpy BGR
-            qimg = pix.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
-            ptr = qimg.bits()
-            arr = np.frombuffer(ptr, np.uint8).reshape((qimg.height(), qimg.width(), 4))
-            frame = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-            self.image_mode._source = frame.copy()
-            self.image_mode.apply_filter()
-        else:
-            # 一般模式：匯入原始畫面
-            frame = self._get_current_raw_frame()
-            if frame is not None:
-                self.image_mode._source = frame.copy()
-                self.image_mode.apply_filter()
-        self.image_mode.show()
-        self.image_mode.raise_()
+        if not path:
+            return
+        image = cv2.imread(path)
+        if image is None:
+            return
+        self.import_image(image)
+
+    def dragEnterEvent(self, event) -> None:
+        """接受圖片檔案拖放。"""
+        if event.mimeData().hasUrls() or event.mimeData().hasImage():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        """處理拖放的圖片檔案。"""
+        mime = event.mimeData()
+        if mime.hasUrls():
+            for url in mime.urls():
+                path = url.toLocalFile()
+                if path:
+                    image = cv2.imread(path)
+                    if image is not None:
+                        self.import_image(image)
+                        return
+        if mime.hasImage():
+            qimg = QImage(mime.imageData())
+            if not qimg.isNull():
+                converted = qimg.convertToFormat(QImage.Format.Format_RGBA8888)
+                ptr = converted.bits()
+                arr = np.frombuffer(ptr, np.uint8).reshape((converted.height(), converted.width(), 4))
+                bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+                self.import_image(bgr)
 
     def on_settings_changed(
         self, levels: int, min_value: int, max_value: int, exp_value: float
@@ -568,7 +619,7 @@ class OverlayWindow(QMainWindow):
             return None
 
     def refresh_frame(self) -> None:
-        if self._is_refreshing or self._is_dragging or self._is_resizing:
+        if self._is_refreshing or self._is_dragging:
             return
         self._is_refreshing = True
         try:
@@ -578,22 +629,40 @@ class OverlayWindow(QMainWindow):
             dpr = self.devicePixelRatioF()
             
             # --- 核心邏輯：決定影像來源 ---
-            if self._is_frozen and self._frozen_frame is not None:
-                # 凍結模式：從完整凍結影像中裁切出當前鏡片對應的區域
+            if self._is_image_mode and self._source_image is not None:
+                # ImageMode：從完整圖片中按 pan_offset 裁切 viewport
+                src = self._source_image
+                sh, sw = src.shape[:2]
+                view_w = max(1, int(round(rect.width() * dpr)))
+                view_h = max(1, int(round(rect.height() * dpr)))
+                
+                # 限制 pan_offset 在合法範圍
+                max_ox = max(0, sw - view_w)
+                max_oy = max(0, sh - view_h)
+                ox = max(0, min(self._pan_offset_x, max_ox))
+                oy = max(0, min(self._pan_offset_y, max_oy))
+                self._pan_offset_x, self._pan_offset_y = ox, oy
+                
+                # 裁切
+                end_x = min(ox + view_w, sw)
+                end_y = min(oy + view_h, sh)
+                frame = np.ascontiguousarray(src[oy:end_y, ox:end_x])
+                if frame.size == 0:
+                    frame = src
+                    
+            elif self._is_frozen and self._frozen_frame is not None:
+                # 凍結模式：從凍結影像裁切
                 frozen = self._frozen_frame
                 fh, fw = frozen.shape[:2]
-                
-                # 計算鏡片區域在整個視窗中的相對位置
                 panel_h = int(round(self._panel_height * dpr))
                 crop_y = min(panel_h, fh - 1)
                 crop_h = max(1, fh - crop_y)
                 crop_w = min(fw, max(1, int(round(rect.width() * dpr))))
-                
-                frame = frozen[crop_y:crop_y + crop_h, 0:crop_w]
+                frame = np.ascontiguousarray(frozen[crop_y:crop_y + crop_h, 0:crop_w])
                 if frame.size == 0:
-                    frame = frozen  # 如果裁切失敗就用整張
+                    frame = frozen
             else:
-                # 即時模式：精確計算物理座標並擷取
+                # 即時模式：從螢幕擷取
                 phys = self._physical_window_rect()
                 if phys is not None:
                     win_x, win_y, win_pw, win_ph = phys
@@ -618,51 +687,67 @@ class OverlayWindow(QMainWindow):
 
             self._last_gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-            # 特徵檢查：如果「沒凍結」且「畫面沒變」且「設定沒變」，才跳過
+            # 特徵檢查
             signature = self._frame_signature(frame)
-            if not self._is_frozen and signature == self._last_frame_signature and not self._frame.isNull():
+            if signature == self._last_frame_signature and not self._frame.isNull():
                 return
-            
             self._last_frame_signature = signature
 
-            eff_blur = self.settings.blur_radius if self.settings.blur_enabled else 0
-            eff_dither = self.settings.dither_strength if self.settings.dither_enabled else 0
-            
-            # 2. 進行量化處理
-            logic_quantized, logic_indices = quantize_gray_with_indices(
-                frame,
-                self.settings.levels,
-                self.settings.min_value,
-                self.settings.max_value,
-                self.settings.exp_value,
-                display_min=self.settings.display_min_value,
-                display_max=self.settings.display_max_value,
-                display_exp=self.settings.display_exp_value,
-                blur_radius=eff_blur,
-                dither_strength=eff_dither,
-                dither_first=getattr(self.settings, 'dither_first', False),
-            )
-            
-            h, w = logic_quantized.shape[:2]
-            self._frame_array = logic_quantized # 防止垃圾回收
-            
-            qimg = QImage(
-                logic_quantized.data, w, h,
-                logic_quantized.strides[0],
-                QImage.Format.Format_Grayscale8,
-            )
-            qimg.setDevicePixelRatio(dpr)
-            self._frame = QPixmap.fromImage(qimg)
-            
-            self._update_distributions(self._last_gray_frame, logic_indices)
+            h, w = frame.shape[:2]
+
+            # --- Bypass 模式：跳過量化，直接顯示原始影像 ---
+            if self._bypass_mode:
+                raw_rgb = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                self._frame_array = raw_rgb
+                qimg = QImage(
+                    raw_rgb.data, w, h,
+                    raw_rgb.strides[0],
+                    QImage.Format.Format_RGB888,
+                )
+                qimg.setDevicePixelRatio(dpr)
+                self._frame = QPixmap.fromImage(qimg)
+                # Bypass 時不更新分佈
+                self._processed_distribution_pct = [0.0] * max(2, int(self.settings.levels))
+                self._raw_distribution_pct = [0.0] * max(2, int(self.settings.levels))
+            else:
+                # 正常量化處理
+                eff_blur = self.settings.blur_radius if self.settings.blur_enabled else 0
+                eff_dither = self.settings.dither_strength if self.settings.dither_enabled else 0
+                
+                logic_quantized, logic_indices = quantize_gray_with_indices(
+                    frame,
+                    self.settings.levels,
+                    self.settings.min_value,
+                    self.settings.max_value,
+                    self.settings.exp_value,
+                    display_min=self.settings.display_min_value,
+                    display_max=self.settings.display_max_value,
+                    display_exp=self.settings.display_exp_value,
+                    blur_radius=eff_blur,
+                    dither_strength=eff_dither,
+                    dither_first=getattr(self.settings, 'dither_first', False),
+                )
+                
+                h, w = logic_quantized.shape[:2]
+                self._frame_array = logic_quantized
+                
+                qimg = QImage(
+                    logic_quantized.data, w, h,
+                    logic_quantized.strides[0],
+                    QImage.Format.Format_Grayscale8,
+                )
+                qimg.setDevicePixelRatio(dpr)
+                self._frame = QPixmap.fromImage(qimg)
+                self._update_distributions(self._last_gray_frame, logic_indices)
             
             # 3. 處理對照圖
             if self._compare_mode:
                 if self.settings.compare_bw:
-                    self._raw_frame_array = self._last_gray_frame
+                    gray_cont = np.ascontiguousarray(self._last_gray_frame)
+                    self._raw_frame_array = gray_cont
                     raw_qimg = QImage(
-                        self._last_gray_frame.data, w, h,
-                        self._last_gray_frame.strides[0],
+                        gray_cont.data, w, h,
+                        gray_cont.strides[0],
                         QImage.Format.Format_Grayscale8,
                     )
                 else:
@@ -678,24 +763,20 @@ class OverlayWindow(QMainWindow):
             else:
                 self._raw_frame = QPixmap()
             
-            # 強制觸發重繪
             self.update()
 
-            # 如果有待處理的自動平衡（剛切換階層），在此執行
+            # 自動平衡邏輯
             if self._auto_balance_pending:
                 self._auto_balance_pending = False
                 if self._auto_balance_use_current:
-                    # 維持當前選定的比例
                     target = self.panel.balance_presets.currentData()
                     if target:
                         self.on_auto_balance_target_requested(target)
                     else:
                         self.on_auto_balance_raw_requested()
                 else:
-                    # 執行全域最佳平衡
                     self.on_auto_balance_raw_requested()
             elif self._auto_continuous_enabled:
-                # 持續模式：降頻執行 (例如 150ms 一次)
                 now = time.monotonic()
                 if now - self._last_auto_balance_ts > 0.15:
                     self._last_auto_balance_ts = now
@@ -703,6 +784,7 @@ class OverlayWindow(QMainWindow):
                     if current_target:
                         self.on_auto_balance_target_requested(current_target)
         finally:
+
             self._is_refreshing = False
 
     @staticmethod
@@ -1027,6 +1109,14 @@ class OverlayWindow(QMainWindow):
             if self.panel.isVisible() and self.panel.geometry().contains(pos):
                 super().mousePressEvent(event)
                 return
+            # ImageMode 下鏡片區域 → 平移圖片
+            if self._is_image_mode and self._source_image is not None:
+                lens = self._lens_rect()
+                if lens.contains(pos) or (self._compare_mode and self._compare_rect().contains(pos)):
+                    self._pan_drag_start = event.globalPosition().toPoint()
+                    self._pan_start_offset = (self._pan_offset_x, self._pan_offset_y)
+                    event.accept()
+                    return
             self._is_dragging = True
             self._boost_motion(2.0)
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -1055,6 +1145,16 @@ class OverlayWindow(QMainWindow):
             self.request_refresh(0)
             return
 
+        # ImageMode 平移圖片
+        if self._pan_drag_start is not None and self._pan_start_offset is not None:
+            delta = self._pan_drag_start - event.globalPosition().toPoint()
+            self._pan_offset_x = self._pan_start_offset[0] + delta.x()
+            self._pan_offset_y = self._pan_start_offset[1] + delta.y()
+            self._last_frame_signature = None
+            self._is_refreshing = False
+            self.refresh_frame()
+            return
+
         if self._drag_pos is None:
             return
         self.move(event.globalPosition().toPoint() - self._drag_pos)
@@ -1068,6 +1168,8 @@ class OverlayWindow(QMainWindow):
         self._resize_edges = 0
         self._resize_start_geom = None
         self._resize_start_global = None
+        self._pan_drag_start = None
+        self._pan_start_offset = None
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self._boost_motion(1.5)
         self.request_refresh(20)
@@ -1101,7 +1203,20 @@ class OverlayWindow(QMainWindow):
         if event.key() == Qt.Key.Key_Escape:
             self.force_quit()
             return
+        # Ctrl+V 貼上圖片
+        if event.key() == Qt.Key.Key_V and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            from PySide6.QtWidgets import QApplication
+            clipboard = QApplication.clipboard()
+            qimg = clipboard.image()
+            if not qimg.isNull():
+                converted = qimg.convertToFormat(QImage.Format.Format_RGBA8888)
+                ptr = converted.bits()
+                arr = np.frombuffer(ptr, np.uint8).reshape((converted.height(), converted.width(), 4))
+                bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+                self.import_image(bgr)
+            return
         super().keyPressEvent(event)
+
 
 
 

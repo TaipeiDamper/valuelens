@@ -40,7 +40,10 @@ QToolButton {
 }
 QToolButton:hover { background: #444; border: 1px solid #555; }
 QToolButton:checked { background: #2e7bf6; border: 1px solid #1a5ed1; }
+QToolButton[freeze_mode="frozen"] { background: #0078d7; color: white; border: 1px solid white; padding: 3px 10px; border-radius: 4px; font-size: 9pt; }
+QToolButton[freeze_mode="image"] { background: #00a86b; color: white; border: 1px solid white; padding: 3px 10px; border-radius: 4px; font-size: 9pt; }
 QToolButton#gl_winbtn { border: none; background: transparent; padding: 0 10px; font-size: 11pt; }
+
 QToolButton#gl_winbtn:hover { background: rgba(255,255,255,20); }
 QToolButton#gl_closebtn:hover { background: #e81123; color: white; }
 
@@ -106,6 +109,7 @@ class ControlPanel(QWidget):
     import_requested = Signal()
     screenshot_requested = Signal()
     distribution_toggled = Signal(bool)
+    bypass_toggled = Signal(bool)
     quit_requested = Signal()
     minimize_requested = Signal()
     drag_started = Signal(object)
@@ -210,6 +214,13 @@ class ControlPanel(QWidget):
         self.distribution_btn.setChecked(True)
         self.distribution_btn.toggled.connect(self.distribution_toggled.emit)
 
+        self.bypass_btn = QToolButton()
+        self.bypass_btn.setText("▶️")
+        self.bypass_btn.setToolTip("Bypass: 跳過所有處理，顯示原始影像")
+        self.bypass_btn.setCheckable(True)
+        self.bypass_btn.setChecked(False)
+        self.bypass_btn.toggled.connect(self._on_bypass_toggled)
+
         self.balance_raw_btn = QToolButton()
         self.balance_raw_btn.setText("重新平衡")
         self.balance_raw_btn.setToolTip("根據目前畫面分佈，自動切換至最接近的預設比例並套用 (會關閉自動追蹤)")
@@ -252,7 +263,6 @@ class ControlPanel(QWidget):
         self.order_btn.setText("先 Bilateral 後 Ordered" if not getattr(settings, 'dither_first', False) else "先 Ordered 後 Bilateral")
         self.order_btn.setToolTip("點擊切換平滑與遞色兩階段的處理順序")
         self.order_btn.toggled.connect(self._on_order_toggled)
-        self.order_btn.toggled.connect(self._on_order_toggled)
 
         self.collapse_btn = QToolButton()
         self.collapse_btn.setText("▲")
@@ -276,6 +286,7 @@ class ControlPanel(QWidget):
         top_layout.addWidget(self.screenshot_btn)
         top_layout.addWidget(self.image_mode_btn)
         top_layout.addWidget(self.distribution_btn)
+        top_layout.addWidget(self.bypass_btn)
         top_layout.addStretch(1)
         top_layout.addWidget(self.collapse_btn)
         top_layout.addWidget(self.more_btn)
@@ -401,6 +412,14 @@ class ControlPanel(QWidget):
     def _on_order_toggled(self, checked: bool) -> None:
         self.order_btn.setText("先 Ordered 後 Bilateral" if checked else "先 Bilateral 後 Ordered")
         self._emit_effect_settings()
+
+    def _on_bypass_toggled(self, checked: bool) -> None:
+        self.bypass_btn.setText("⏸️" if checked else "▶️")
+        self.bypass_btn.setToolTip(
+            "Bypass ON: 顯示原始影像 (點擊恢復處理)" if checked 
+            else "Bypass: 跳過所有處理，顯示原始影像"
+        )
+        self.bypass_toggled.emit(checked)
 
     def _emit_effect_settings(self, *_) -> None:
         self.effect_settings_changed.emit(
