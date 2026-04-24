@@ -32,19 +32,19 @@ def quantize_gray_with_indices(
     blur_radius: int = 0,
     dither_strength: int = 0,
     dither_first: bool = False,
-) -> tuple[np.ndarray, np.ndarray]:
+    edge_strength: int = 0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     levels = max(2, int(levels))
     min_value = max(0, min(255, int(min_value)))
     max_value = max(min_value + 1, min(255, int(max_value)))
 
-    # Step 1: Grayscale (uint8 is much faster for Bilateral)
+    # Step 1: Grayscale
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    edges = None
 
     def apply_bilateral(img_u8):
         if blur_radius <= 0: return img_u8
-        # Allow slightly larger diameter for stronger effect, but cap at 15 for performance
         d = min(15, max(5, blur_radius // 2))
-        # Multiply sigma by 4 (from 2.0 to 8.0) for a 4x stronger color bleed/smoothing
         sig = blur_radius * 8.0
         return cv2.bilateralFilter(img_u8, d, sig, sig)
 
@@ -53,7 +53,6 @@ def quantize_gray_with_indices(
         h, w = img_float.shape[:2]
         tiled_bayer = get_tiled_bayer(h, w)
         step_size = 255.0 / (levels - 1)
-        # Multiply dither amplitude by 4 (from 0.5 to 2.0)
         img_float += tiled_bayer * step_size * (dither_strength / 100.0) * 2.0
         return img_float
 
@@ -61,13 +60,11 @@ def quantize_gray_with_indices(
     if dither_first:
         gray_float = gray.astype(np.float32)
         gray_float = apply_ordered_dither(gray_float)
-        # If dither first, we have to do bilateral on float32 (slower but mathematically correct here)
         if blur_radius > 0:
             d = min(9, blur_radius)
             sig = blur_radius * 2.0
             gray_float = cv2.bilateralFilter(gray_float, d, sig, sig)
     else:
-        # Fast path: Bilateral on uint8, then convert to float for dither
         gray = apply_bilateral(gray)
         gray_float = gray.astype(np.float32)
         gray_float = apply_ordered_dither(gray_float)
@@ -77,19 +74,28 @@ def quantize_gray_with_indices(
     span = float(max_value - min_value)
     if span == 0: span = 1.0 # Prevent division by zero
     
-    # In-place normalization
     gray_float -= min_value
     gray_float /= span
     
     if exp_value != 0.0:
         gamma_logic = float(np.power(2.0, float(exp_value)))
-        cv2.pow(gray_float, gamma_logic, gray_float) # cv2.pow is often faster than np.power
+        cv2.pow(gray_float, gamma_logic, gray_float)
     
     gray_float *= levels
     indices = np.floor(gray_float)
     indices = np.clip(indices, 0, levels - 1).astype(np.int32)
     
-    # --- Stage 2: Display Mapping (One-pass) ---
+    # --- 邊緣檢測：基於第一階段 (Logic) 計算完的結果 ---
+    if edge_strength > 0:
+        # 將索引映射到 0-255
+        u8_logic = (indices * (255.0 / (levels - 1))).astype(np.uint8)
+        # 擴大門檻範圍：強度 100 -> t1=1, 強度 0 -> t1=255
+        # 這樣可以明顯感覺到邊緣隨著強度降低而過濾掉
+        t1 = max(1, int(255 - edge_strength * 2.54))
+        t2 = t1 * 2
+        edges = cv2.Canny(u8_logic, t1, t2)
+    
+    # --- Stage 2: Display Mapping ---
     norm_display = indices.astype(np.float32) / (levels - 1)
     
     if display_exp is not None and display_exp != 0:
@@ -104,7 +110,7 @@ def quantize_gray_with_indices(
         out_float = norm_display * 255.0
         
     out = np.clip(out_float, 0, 255).astype(np.uint8)
-    return out, indices
+    return out, indices, edges
 
 
 def quantize_gray(
@@ -119,8 +125,9 @@ def quantize_gray(
     blur_radius: int = 0,
     dither_strength: int = 0,
     dither_first: bool = False,
+    edge_strength: int = 0,
 ) -> np.ndarray:
-    out_gray, _ = quantize_gray_with_indices(
+    out_gray, _, _ = quantize_gray_with_indices(
         bgr, levels, min_value, max_value, exp_value,
         display_min=display_min,
         display_max=display_max,
@@ -128,6 +135,7 @@ def quantize_gray(
         blur_radius=blur_radius,
         dither_strength=dither_strength,
         dither_first=dither_first,
+        edge_strength=edge_strength,
     )
     return cv2.cvtColor(out_gray, cv2.COLOR_GRAY2BGR)
 

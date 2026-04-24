@@ -24,6 +24,10 @@ class AppSettings:
     dither_enabled: bool = False
     dither_strength: int = 0
     dither_first: bool = False
+    edge_enabled: bool = False
+    edge_strength: int = 50
+    edge_mix: int = 100
+    edge_color: tuple[int, int, int] = (0, 0, 0)
     refresh_ms: int = 100
     x: int = 200
     y: int = 200

@@ -101,7 +101,7 @@ QSlider::handle:horizontal:hover {
 class ControlPanel(QWidget):
     settings_changed = Signal(int, int, int, float)
     display_settings_changed = Signal(int, int, float)
-    effect_settings_changed = Signal(bool, int, bool, int, bool) # blur, b_r, dither, d_s, d_first
+    effect_settings_changed = Signal(bool, int, bool, int, bool)
     collapse_toggled = Signal(bool)
     compare_mode_changed = Signal(bool)
     hotkey_changed = Signal(str)
@@ -116,6 +116,7 @@ class ControlPanel(QWidget):
     auto_balance_raw_requested = Signal()
     auto_balance_target_requested = Signal(tuple)
     auto_continuous_toggled = Signal(bool)
+    edge_settings_changed = Signal(bool, int, int)
 
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
@@ -257,6 +258,21 @@ class ControlPanel(QWidget):
         self.dither_slider.setValue(settings.dither_strength)
         self.dither_slider.setFixedWidth(110)
 
+        # Edges
+        self.edge_check = QCheckBox("顯示邊緣")
+        self.edge_check.setChecked(settings.edge_enabled)
+        self.edge_slider = QSlider(Qt.Orientation.Horizontal)
+        self.edge_slider.setRange(0, 100)
+        self.edge_slider.setValue(settings.edge_strength)
+        self.edge_slider.setFixedWidth(80)
+        self.edge_slider.setToolTip("邊緣偵測強度 (Canny Threshold)")
+
+        self.edge_mix_slider = QSlider(Qt.Orientation.Horizontal)
+        self.edge_mix_slider.setRange(0, 100)
+        self.edge_mix_slider.setValue(settings.edge_mix)
+        self.edge_mix_slider.setFixedWidth(80)
+        self.edge_mix_slider.setToolTip("邊緣混合比例 (0:原圖, 100:純邊緣)")
+
         self.order_btn = QToolButton()
         self.order_btn.setCheckable(True)
         self.order_btn.setChecked(getattr(settings, 'dither_first', False))
@@ -317,6 +333,11 @@ class ControlPanel(QWidget):
         row3.addWidget(self.order_btn)
         row3.addWidget(self.dither_check)
         row3.addWidget(self.dither_slider, 2)
+        row3.addWidget(self.edge_check)
+        row3.addWidget(QLabel("強度"))
+        row3.addWidget(self.edge_slider)
+        row3.addWidget(QLabel("比例"))
+        row3.addWidget(self.edge_mix_slider)
         row3.addStretch(1)
 
         bottom_row = QHBoxLayout()
@@ -353,6 +374,9 @@ class ControlPanel(QWidget):
         self.blur_slider.valueChanged.connect(self._emit_effect_settings)
         self.dither_check.toggled.connect(self._emit_effect_settings)
         self.dither_slider.valueChanged.connect(self._emit_effect_settings)
+        self.edge_check.toggled.connect(self._emit_edge_settings)
+        self.edge_slider.valueChanged.connect(self._emit_edge_settings)
+        self.edge_mix_slider.valueChanged.connect(self._emit_edge_settings)
         self.image_mode_action.triggered.connect(self.image_mode_requested.emit)
         self.hotkey_action.triggered.connect(self._prompt_hotkey)
         self.quit_action.triggered.connect(self.quit_requested.emit)
@@ -428,6 +452,13 @@ class ControlPanel(QWidget):
             self.dither_check.isChecked(),
             self.dither_slider.value(),
             self.order_btn.isChecked(),
+        )
+
+    def _emit_edge_settings(self, *_) -> None:
+        self.edge_settings_changed.emit(
+            self.edge_check.isChecked(),
+            self.edge_slider.value(),
+            self.edge_mix_slider.value(),
         )
 
     def _prompt_hotkey(self) -> None:
@@ -540,6 +571,9 @@ class ControlPanel(QWidget):
         self.dither_check.setChecked(settings.dither_enabled)
         self.dither_slider.setValue(settings.dither_strength)
         self.order_btn.setChecked(getattr(settings, 'dither_first', False))
+        self.edge_check.setChecked(settings.edge_enabled)
+        self.edge_slider.setValue(settings.edge_strength)
+        self.edge_mix_slider.setValue(settings.edge_mix)
         self._current_hotkey = settings.hotkey
         self.hotkey_action.setText(f"設定快捷鍵 ({settings.hotkey})")
         # Update labels

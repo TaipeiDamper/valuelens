@@ -126,7 +126,9 @@ class OverlayWindow(QMainWindow):
         self._is_dragging = False
         self._is_resizing = False
         self._is_refreshing = False
-        self._active_refresh_ms = max(16, int(self.settings.refresh_ms))
+        self._active_refresh_ms = 33        # 預設 30 FPS
+        self._fps_count = 0                # FPS 計數
+        self._fps_last_report = time.time() # 上次報告時間
         self._interaction_refresh_ms = 33 # 30 FPS for dragging/resizing
         self._idle_refresh_ms = 2000
         self._motion_boost_until = 0.0
@@ -178,6 +180,7 @@ class OverlayWindow(QMainWindow):
         self.panel.auto_balance_raw_requested.connect(self.on_auto_balance_raw_requested)
         self.panel.auto_balance_target_requested.connect(self.on_auto_balance_target_requested)
         self.panel.auto_continuous_toggled.connect(self.on_auto_continuous_toggled)
+        self.panel.edge_settings_changed.connect(self.on_edge_settings_changed)
         self.panel.import_requested.connect(self.toggle_freeze_mode)
         self.panel.screenshot_requested.connect(self.on_screenshot_requested)
         self.panel.image_mode_requested.connect(self.open_image_mode)
@@ -196,6 +199,13 @@ class OverlayWindow(QMainWindow):
         # 拖放支援
         self.setAcceptDrops(True)
 
+        # 啟動時強制重設邊緣偵測並跑一次自動平衡
+        self.settings.edge_enabled = False
+        self.settings.edge_color = (0, 0, 0) # 強制設為黑色
+        self.panel.sync_from_settings(self.settings)
+        QTimer.singleShot(500, self.on_auto_balance_raw_requested)
+
+        self.show()
         self.request_refresh()
 
     def _get_current_raw_frame(self) -> np.ndarray | None:
@@ -545,6 +555,15 @@ class OverlayWindow(QMainWindow):
             self._last_auto_balance_ts = 0.0 # 立即執行一次
             self.request_refresh()
 
+    def on_edge_settings_changed(self, enabled: bool, strength: int, mix: int) -> None:
+        """邊緣檢測設定變更。"""
+        self.settings.edge_enabled = enabled
+        self.settings.edge_strength = strength
+        self.settings.edge_mix = mix
+        self._last_frame_signature = None
+        self._boost_motion(1.0)
+        self.request_refresh(16)
+
     def on_auto_balance_raw_requested(self) -> None:
         # 點擊重新平衡時，關閉持續模式
         if self._auto_continuous_enabled:
@@ -667,8 +686,18 @@ class OverlayWindow(QMainWindow):
             return None
 
     def refresh_frame(self) -> None:
-        if self._is_refreshing or self._is_dragging:
+        """核心影像處理管線。"""
+        if self._is_refreshing:
             return
+        
+        self._fps_count += 1
+        now = time.time()
+        if now - self._fps_last_report >= 5.0:
+            avg_fps = self._fps_count / (now - self._fps_last_report)
+            print(f"[Performance] Avg FPS over last 5s: {avg_fps:.2f}")
+            self._fps_count = 0
+            self._fps_last_report = now
+
         self._is_refreshing = True
         try:
             # 1. 座標與參數準備
@@ -776,15 +805,15 @@ class OverlayWindow(QMainWindow):
                 )
                 qimg.setDevicePixelRatio(dpr)
                 self._frame = QPixmap.fromImage(qimg)
-                # Bypass 時不更新分佈
                 self._processed_distribution_pct = [0.0] * max(2, int(self.settings.levels))
                 self._raw_distribution_pct = [0.0] * max(2, int(self.settings.levels))
             else:
                 # 正常量化處理
                 eff_blur = self.settings.blur_radius if self.settings.blur_enabled else 0
                 eff_dither = self.settings.dither_strength if self.settings.dither_enabled else 0
+                eff_edge = self.settings.edge_strength if self.settings.edge_enabled else 0
                 
-                logic_quantized, logic_indices = quantize_gray_with_indices(
+                logic_quantized, logic_indices, edges = quantize_gray_with_indices(
                     frame,
                     self.settings.levels,
                     self.settings.min_value,
@@ -796,16 +825,46 @@ class OverlayWindow(QMainWindow):
                     blur_radius=eff_blur,
                     dither_strength=eff_dither,
                     dither_first=getattr(self.settings, 'dither_first', False),
+                    edge_strength=eff_edge,
                 )
                 
                 h, w = logic_quantized.shape[:2]
-                self._frame_array = logic_quantized
                 
-                qimg = QImage(
-                    logic_quantized.data, w, h,
-                    logic_quantized.strides[0],
-                    QImage.Format.Format_Grayscale8,
-                )
+                # 處理邊緣與比例 (Edge Mix)
+                if edges is not None:
+                    mix = self.settings.edge_mix / 100.0
+                    ec = self.settings.edge_color[::-1] # RGB -> BGR (預設為黑色)
+                    
+                    # 原始量化圖轉為 BGR 用於混合
+                    base_bgr = cv2.cvtColor(logic_quantized, cv2.COLOR_GRAY2BGR)
+                    
+                    if mix >= 1.0:
+                        # 純邊緣模式：背景全白，邊緣為黑色 (或設定色)
+                        final_bgr = np.full_like(base_bgr, 255)
+                        final_bgr[edges > 0] = ec
+                    else:
+                        # 混合模式：(1-mix) * 原圖 + mix * 白色背景，最後疊加邊緣
+                        # 讓原圖隨著 mix 增加而淡出至白色
+                        bg_part = (base_bgr.astype(np.float32) * (1.0 - mix) + 255.0 * mix).astype(np.uint8)
+                        final_bgr = bg_part
+                        final_bgr[edges > 0] = ec
+                    
+                    # 轉回 RGB 給 QImage
+                    out_rgb = cv2.cvtColor(final_bgr, cv2.COLOR_BGR2RGB)
+                    self._frame_array = out_rgb
+                    qimg = QImage(
+                        out_rgb.data, w, h,
+                        out_rgb.strides[0],
+                        QImage.Format.Format_RGB888,
+                    )
+                else:
+                    self._frame_array = logic_quantized
+                    qimg = QImage(
+                        logic_quantized.data, w, h,
+                        logic_quantized.strides[0],
+                        QImage.Format.Format_Grayscale8,
+                    )
+                
                 qimg.setDevicePixelRatio(dpr)
                 self._frame = QPixmap.fromImage(qimg)
                 self._update_distributions(self._last_gray_frame, logic_indices)
