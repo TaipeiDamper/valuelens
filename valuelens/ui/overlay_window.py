@@ -142,6 +142,8 @@ class OverlayWindow(QMainWindow):
         self._auto_continuous_enabled = False
         self._remembered_multi_ratio = None # 記憶 3, 5, 8 階
         self._remembered_two_ratio = None   # 記憶 2 階
+        self._is_frozen = False             # 是否處於凍結模式
+        self._frozen_frame = None           # 凍結的原始影像
         self._last_auto_balance_ts = 0.0
 
         self.timer = QTimer(self)
@@ -197,33 +199,64 @@ class OverlayWindow(QMainWindow):
         
         # 如果是比較模式，我們需要擷取包含原圖與對照圖的完整區域
         if self._compare_mode:
-            # 擷取整個視窗中除了控制面板以外的部分
-            # 我們可以直接計算包含兩個矩形的範圍
             lens = self._lens_rect()
             comp = self._compare_rect()
             full_rect = lens.united(comp)
             pix = self.grab(full_rect)
         else:
-            # 單純擷取量化後的鏡片內容
             pix = self.grab(self._lens_rect())
             
         cb.setPixmap(pix)
-        self._boost_motion(0.5) # 閃爍一下提示成功
+        self._boost_motion(0.5) 
+
+    def toggle_freeze_mode(self) -> None:
+        """切換凍結模式：鎖定當前畫面或恢復即時擷取。"""
+        print(f"[Freeze] toggle called, currently frozen={self._is_frozen}")
+        if self._is_frozen:
+            # 恢復即時模式
+            self._is_frozen = False
+            self._frozen_frame = None
+            self.panel.freeze_btn.setStyleSheet("") 
+            self.panel.freeze_btn.setToolTip("鎖定當下畫面 (就地凍結)")
+            print("[Freeze] UNFROZEN")
+        else:
+            # 擷取整個視窗背後的影像（包含工具列後面的區域）
+            # 這樣收合面板時，會有更大範圍的影像可以使用
+            dpr = self.devicePixelRatioF()
+            phys = self._physical_window_rect()
+            if phys is not None:
+                win_x, win_y, win_pw, win_ph = phys
+                frame = self.capture.capture_region(
+                    win_x, win_y, win_pw, win_ph,
+                    exclude_hwnd=self._hwnd()
+                )
+            else:
+                # 備用：只擷取鏡片區域
+                frame = self._last_raw_bgr_frame
+                if frame is None:
+                    rect = self._lens_rect()
+                    frame = self.capture.capture_region(
+                        rect.x(), rect.y(), rect.width(), rect.height(),
+                        exclude_hwnd=self._hwnd()
+                    )
+                
+            if frame is not None:
+                self._is_frozen = True
+                self._frozen_frame = frame.copy()
+                self.panel.freeze_btn.setStyleSheet("background-color: #0078d7; color: white; border: 1px solid white;")
+                self.panel.freeze_btn.setToolTip("點擊解除鎖定 (目前已凍結)")
+                print(f"[Freeze] FROZEN, frame shape={frame.shape}")
+            else:
+                print("[Freeze] FAILED - no frame available")
         
+        self._last_frame_signature = None
+        self._is_refreshing = False  # 強制解鎖刷新
+        self.refresh_frame()
+        self.update()
+
     def open_image_mode(self) -> None:
-        self.image_mode.set_quantize_settings(
-            self.settings.levels,
-            self.settings.min_value,
-            self.settings.max_value,
-            self.settings.exp_value,
-            self.settings.blur_enabled,
-            self.settings.blur_radius,
-            self.settings.dither_enabled,
-            self.settings.dither_strength,
-            getattr(self.settings, 'dither_first', False),
-        )
-        self.image_mode.show()
-        self.image_mode.raise_()
+        """點擊凍結按鈕的進入點。"""
+        self.toggle_freeze_mode()
 
     def on_settings_changed(
         self, levels: int, min_value: int, max_value: int, exp_value: float
@@ -309,6 +342,12 @@ class OverlayWindow(QMainWindow):
     def on_collapse_toggled(self, collapsed: bool) -> None:
         self._panel_height = 36 if collapsed else 136
         self._layout_panel()
+        
+        # 面板收合會導致鏡片區域 (lens rect) 大小與物理座標改變
+        # 我們必須清除快取，強制下一幀重新計算
+        self._last_capture_rect = None
+        self._last_frame_signature = None
+        
         self.request_refresh(10)
 
     def on_compare_mode_changed(self, enabled: bool) -> None:
@@ -495,48 +534,63 @@ class OverlayWindow(QMainWindow):
             return
         self._is_refreshing = True
         try:
-            lens = self._lens_rect()
-            if lens.width() <= 0 or lens.height() <= 0:
+            # 1. 座標與參數準備
+            rect = self._lens_rect()
+            if rect.width() <= 0 or rect.height() <= 0: return
+            dpr = self.devicePixelRatioF()
+            
+            # --- 核心邏輯：決定影像來源 ---
+            if self._is_frozen and self._frozen_frame is not None:
+                # 凍結模式：從完整凍結影像中裁切出當前鏡片對應的區域
+                frozen = self._frozen_frame
+                fh, fw = frozen.shape[:2]
+                
+                # 計算鏡片區域在整個視窗中的相對位置
+                panel_h = int(round(self._panel_height * dpr))
+                crop_y = min(panel_h, fh - 1)
+                crop_h = max(1, fh - crop_y)
+                crop_w = min(fw, max(1, int(round(rect.width() * dpr))))
+                
+                frame = frozen[crop_y:crop_y + crop_h, 0:crop_w]
+                if frame.size == 0:
+                    frame = frozen  # 如果裁切失敗就用整張
+            else:
+                # 即時模式：精確計算物理座標並擷取
+                phys = self._physical_window_rect()
+                if phys is not None:
+                    win_x, win_y, win_pw, win_ph = phys
+                    panel_h_phys = int(round(self._panel_height * dpr))
+                    cap_x, cap_y = win_x, win_y + panel_h_phys
+                    cap_w, cap_h = win_pw, max(1, win_ph - panel_h_phys)
+                else:
+                    cap_x = int(round((self.x() + rect.x()) * dpr))
+                    cap_y = int(round((self.y() + rect.y()) * dpr))
+                    cap_w = max(1, int(round(rect.width() * dpr)))
+                    cap_h = max(1, int(round(rect.height() * dpr)))
+                
+                hwnd = self._hwnd()
+                frame = self.capture.capture_region(
+                    cap_x, cap_y, cap_w, cap_h, exclude_hwnd=hwnd
+                )
+                if frame is not None:
+                    self._last_raw_bgr_frame = frame.copy()
+            
+            if frame is None or frame.size == 0: 
                 return
 
-            dpr = self.devicePixelRatioF()
-            phys = self._physical_window_rect()
-            if phys is not None:
-                win_x, win_y, win_pw, win_ph = phys
-                panel_h_phys = int(round(self._panel_height * dpr))
-                cap_x = win_x
-                cap_y = win_y + panel_h_phys
-                cap_w = win_pw
-                cap_h = max(1, win_ph - panel_h_phys)
-            else:
-                cap_x = int(round((self.x() + lens.x()) * dpr))
-                cap_y = int(round((self.y() + lens.y()) * dpr))
-                cap_w = max(1, int(round(lens.width() * dpr)))
-                cap_h = max(1, int(round(lens.height() * dpr)))
-
-            capture_rect = (cap_x, cap_y, cap_w, cap_h)
-            if capture_rect != self._last_capture_rect:
-                self._boost_motion(1.0)
-                self._last_capture_rect = capture_rect
-
-            frame = self.capture.capture_region(
-                cap_x, cap_y, cap_w, cap_h, exclude_hwnd=self._hwnd()
-            )
-            self._last_raw_bgr_frame = frame.copy()
             self._last_gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
+            # 特徵檢查：如果「沒凍結」且「畫面沒變」且「設定沒變」，才跳過
             signature = self._frame_signature(frame)
-            if signature == self._last_frame_signature and not self._frame.isNull():
-                self._stable_frame_count += 1
-                if self._stable_frame_count >= 3:
-                    self._motion_boost_until = 0.0
+            if not self._is_frozen and signature == self._last_frame_signature and not self._frame.isNull():
                 return
-            self._stable_frame_count = 0
+            
             self._last_frame_signature = signature
 
             eff_blur = self.settings.blur_radius if self.settings.blur_enabled else 0
             eff_dither = self.settings.dither_strength if self.settings.dither_enabled else 0
             
+            # 2. 進行量化處理
             logic_quantized, logic_indices = quantize_gray_with_indices(
                 frame,
                 self.settings.levels,
@@ -550,9 +604,10 @@ class OverlayWindow(QMainWindow):
                 dither_strength=eff_dither,
                 dither_first=getattr(self.settings, 'dither_first', False),
             )
+            
             h, w = logic_quantized.shape[:2]
-            # 保留 ndarray 引用防止 GC
-            self._frame_array = logic_quantized
+            self._frame_array = logic_quantized # 防止垃圾回收
+            
             qimg = QImage(
                 logic_quantized.data, w, h,
                 logic_quantized.strides[0],
@@ -560,7 +615,10 @@ class OverlayWindow(QMainWindow):
             )
             qimg.setDevicePixelRatio(dpr)
             self._frame = QPixmap.fromImage(qimg)
+            
             self._update_distributions(self._last_gray_frame, logic_indices)
+            
+            # 3. 處理對照圖
             if self._compare_mode:
                 if self.settings.compare_bw:
                     self._raw_frame_array = self._last_gray_frame
@@ -579,11 +637,11 @@ class OverlayWindow(QMainWindow):
                     )
                 raw_qimg.setDevicePixelRatio(dpr)
                 self._raw_frame = QPixmap.fromImage(raw_qimg)
-                self.update(self.rect())
             else:
                 self._raw_frame = QPixmap()
-                self._raw_frame_array = None
-                self.update(lens)
+            
+            # 強制觸發重繪
+            self.update()
 
             # 如果有待處理的自動平衡（剛切換階層），在此執行
             if self._auto_balance_pending:

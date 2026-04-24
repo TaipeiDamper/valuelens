@@ -187,13 +187,13 @@ class ControlPanel(QWidget):
         self.close_btn.setFixedWidth(34)
         self.close_btn.setStyleSheet("QToolButton { border: none; padding: 0; font-weight: bold; }")
 
-        self.import_btn = QToolButton()
-        self.import_btn.setText("📷")
-        self.import_btn.setToolTip("鎖定當下畫面 (作為參考圖)")
-        self.import_btn.clicked.connect(self.import_requested.emit)
+        self.freeze_btn = QToolButton()
+        self.freeze_btn.setText("🧊")
+        self.freeze_btn.setToolTip("鎖定當下畫面 (就地凍結)")
+        self.freeze_btn.clicked.connect(self.import_requested.emit)
 
         self.screenshot_btn = QToolButton()
-        self.screenshot_btn.setText("📋")
+        self.screenshot_btn.setText("📷")
         self.screenshot_btn.setToolTip("截圖至剪貼簿 (Copy to Clipboard)")
         self.screenshot_btn.clicked.connect(self.screenshot_requested.emit)
 
@@ -259,7 +259,7 @@ class ControlPanel(QWidget):
         top_layout.addWidget(self.balance_presets)
         top_layout.addWidget(self.auto_continuous_check)
         top_layout.addWidget(self.balance_raw_btn)
-        top_layout.addWidget(self.import_btn)
+        top_layout.addWidget(self.freeze_btn)
         top_layout.addWidget(self.screenshot_btn)
         top_layout.addStretch(1)
         top_layout.addWidget(self.collapse_btn)
