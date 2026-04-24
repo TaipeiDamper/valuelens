@@ -144,6 +144,7 @@ class OverlayWindow(QMainWindow):
         self._remembered_two_ratio = None   # 記憶 2 階
         self._is_frozen = False             # 是否處於凍結模式
         self._frozen_frame = None           # 凍結的原始影像
+        self._show_distribution = True      # 是否顯示灰階比例
         self._last_auto_balance_ts = 0.0
 
         self.timer = QTimer(self)
@@ -164,9 +165,10 @@ class OverlayWindow(QMainWindow):
         self.panel.auto_balance_raw_requested.connect(self.on_auto_balance_raw_requested)
         self.panel.auto_balance_target_requested.connect(self.on_auto_balance_target_requested)
         self.panel.auto_continuous_toggled.connect(self.on_auto_continuous_toggled)
-        self.panel.import_requested.connect(self.open_image_mode)
+        self.panel.import_requested.connect(self.toggle_freeze_mode)
         self.panel.screenshot_requested.connect(self.on_screenshot_requested)
         self.panel.image_mode_requested.connect(self.open_image_mode)
+        self.panel.distribution_toggled.connect(self.on_distribution_toggled)
         self.panel.quit_requested.connect(self.force_quit)
         self.panel.minimize_requested.connect(self.showMinimized)
         self.panel.drag_started.connect(self._start_drag_from_panel)
@@ -191,6 +193,11 @@ class OverlayWindow(QMainWindow):
         if hasattr(self, '_last_raw_bgr_frame'):
             return self._last_raw_bgr_frame
         return None
+
+    def on_distribution_toggled(self, show: bool) -> None:
+        """切換灰階比例顯示。"""
+        self._show_distribution = show
+        self.update()
 
     def on_screenshot_requested(self) -> None:
         """擷取當前畫面並存入剪貼簿。"""
@@ -255,8 +262,39 @@ class OverlayWindow(QMainWindow):
         self.update()
 
     def open_image_mode(self) -> None:
-        """點擊凍結按鈕的進入點。"""
-        self.toggle_freeze_mode()
+        """開啟圖片模式對話框。"""
+        self.image_mode.set_quantize_settings(
+            self.settings.levels,
+            self.settings.min_value,
+            self.settings.max_value,
+            self.settings.exp_value,
+            self.settings.blur_enabled,
+            self.settings.blur_radius,
+            self.settings.dither_enabled,
+            self.settings.dither_strength,
+            getattr(self.settings, 'dither_first', False),
+        )
+        # 如果是對照模式，擷取包含兩側的完整並排畫面
+        if self._compare_mode:
+            lens = self._lens_rect()
+            comp = self._compare_rect()
+            full_rect = lens.united(comp)
+            pix = self.grab(full_rect)
+            # QPixmap → numpy BGR
+            qimg = pix.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
+            ptr = qimg.bits()
+            arr = np.frombuffer(ptr, np.uint8).reshape((qimg.height(), qimg.width(), 4))
+            frame = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+            self.image_mode._source = frame.copy()
+            self.image_mode.apply_filter()
+        else:
+            # 一般模式：匯入原始畫面
+            frame = self._get_current_raw_frame()
+            if frame is not None:
+                self.image_mode._source = frame.copy()
+                self.image_mode.apply_filter()
+        self.image_mode.show()
+        self.image_mode.raise_()
 
     def on_settings_changed(
         self, levels: int, min_value: int, max_value: int, exp_value: float
@@ -628,7 +666,7 @@ class OverlayWindow(QMainWindow):
                         QImage.Format.Format_Grayscale8,
                     )
                 else:
-                    raw_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    raw_rgb = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
                     self._raw_frame_array = raw_rgb
                     raw_qimg = QImage(
                         raw_rgb.data, w, h,
@@ -693,10 +731,12 @@ class OverlayWindow(QMainWindow):
             painter.drawLine(divider_x, lens.y(), divider_x, lens.bottom())
         painter.setPen(Qt.GlobalColor.white)
         painter.drawRect(lens.adjusted(0, 0, -1, -1))
-        self._draw_distribution_overlay(painter, lens, self._processed_distribution_pct, "處理")
+        if self._show_distribution:
+            self._draw_distribution_overlay(painter, lens, self._processed_distribution_pct, "處理")
         if self._compare_mode and not compare.isNull():
             painter.drawRect(compare.adjusted(0, 0, -1, -1))
-            self._draw_distribution_overlay(painter, compare, self._raw_distribution_pct, "原始")
+            if self._show_distribution:
+                self._draw_distribution_overlay(painter, compare, self._raw_distribution_pct, "原始")
 
     def _calc_balance_distribution(self, gray: np.ndarray | None) -> tuple[float, float, float]:
         if gray is None or gray.size == 0:
