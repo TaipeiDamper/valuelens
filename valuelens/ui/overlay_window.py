@@ -137,22 +137,26 @@ class OverlayWindow(QMainWindow):
         self._processed_distribution_pct = [0.0] * max(2, int(settings.levels))
         self._raw_distribution_pct = [0.0] * max(2, int(settings.levels))
         self._last_gray_frame: np.ndarray | None = None
-        self._auto_balance_pending = False
-        self._auto_balance_use_current = False
+        self._auto_balance_pending = True   # 開啟時自動執行一次平衡
+        self._auto_balance_use_current = True
         self._auto_continuous_enabled = False
         self._remembered_multi_ratio = None # 記憶 3, 5, 8 階
         self._remembered_two_ratio = None   # 記憶 2 階
-        self._is_frozen = False             # 是否處於凍結模式
-        self._frozen_frame = None           # 凍結的原始影像
         self._show_distribution = True      # 是否顯示灰階比例
         self._bypass_mode = False           # Bypass: 跳過所有處理
-        self._is_image_mode = False         # 是否處於圖片模式
-        self._source_image = None           # 圖片模式：完整原始圖 (BGR)
-        self._full_image_gray = None        # 圖片模式：整張圖的灰階快取
+        self._is_static_mode = False        # 是否處於靜態分析模式 (Frozen 或 ImageMode)
+        self._static_source_type = ""       # "frozen" 或 "image"
+        self._source_image = None           # 靜態模式下的原始底圖 (BGR)
+        self._full_image_gray = None        # 靜態模式下的整張灰階快取
         self._pan_offset_x = 0             # 圖片平移 X 偏移
         self._pan_offset_y = 0             # 圖片平移 Y 偏移
+        self._zoom_factor = 1.0            # 圖片縮放倍率
+        self._use_global_calc = False      # 是否使用全圖計算 (ImageMode)
+        self._rect_compare_bw = QRect()    # 黑白對比按鈕區域 (手動繪製)
+        self._rect_global_calc = QRect()   # 計算全圖按鈕區域 (手動繪製)
         self._pan_drag_start = None        # 平移拖曳起始點
         self._pan_start_offset = None      # 平移拖曳起始偏移
+        self._global_calc_dirty = False    # 標記全圖計算是否需要重新執行一次
         self._last_auto_balance_ts = 0.0
         self._last_raw_bgr_frame = None
 
@@ -186,15 +190,6 @@ class OverlayWindow(QMainWindow):
         self.panel.raise_()
         self._layout_panel()
 
-        self.btn_compare_bw = QToolButton(self)
-        self.btn_compare_bw.setText("黑白")
-        self.btn_compare_bw.setCheckable(True)
-        self.btn_compare_bw.setChecked(self.settings.compare_bw)
-        self.btn_compare_bw.setToolTip("將對比圖轉換為純灰階顯示")
-        self.btn_compare_bw.setStyleSheet("background: rgba(0,0,0,150); color: white; border-radius: 3px; padding: 2px 6px;")
-        self.btn_compare_bw.toggled.connect(self.on_compare_bw_changed)
-        self.btn_compare_bw.hide()
-
         self.hotkeys.register("toggle", self.settings.hotkey, self.toggle_enabled)
         self.hotkeys.register("quit", "ctrl+alt+shift+q", self.force_quit)
 
@@ -211,6 +206,17 @@ class OverlayWindow(QMainWindow):
     def on_distribution_toggled(self, show: bool) -> None:
         """切換灰階比例顯示。"""
         self._show_distribution = show
+        self._layout_overlay_buttons()
+        self.update()
+
+    def on_global_calc_toggled(self, enabled: bool) -> None:
+        self._use_global_calc = enabled
+        self._global_calc_dirty = True
+        # 切換計算範圍時，自動重跑一次平衡
+        self._auto_balance_pending = True
+        self._auto_balance_use_current = True
+        self._boost_motion(0.5)
+        self.request_refresh(10)
         self.update()
 
     def on_bypass_toggled(self, bypass: bool) -> None:
@@ -240,21 +246,21 @@ class OverlayWindow(QMainWindow):
 
     def toggle_freeze_mode(self) -> None:
         """切換凍結模式：鎖定當前畫面或恢復即時擷取。同時處理 ImageMode 釋放。"""
-        print(f"[Freeze] toggle called, frozen={self._is_frozen}, image_mode={self._is_image_mode}")
-        if self._is_frozen or self._is_image_mode:
-            # 恢復即時模式（同時退出 ImageMode）
-            self._is_frozen = False
-            self._is_image_mode = False
-            self._frozen_frame = None
+        if self._is_static_mode:
+            # 恢復即時模式
+            self._is_static_mode = False
+            self._static_source_type = ""
             self._source_image = None
             self._full_image_gray = None
             self._pan_offset_x = 0
             self._pan_offset_y = 0
+            self._zoom_factor = 1.0
             self.panel.freeze_btn.setProperty("freeze_mode", "")
             self.panel.freeze_btn.style().unpolish(self.panel.freeze_btn)
             self.panel.freeze_btn.style().polish(self.panel.freeze_btn)
             self.panel.freeze_btn.setToolTip("鎖定當下畫面 (就地凍結)")
-            print("[Freeze] UNFROZEN / ImageMode EXIT")
+            print("[StaticMode] EXIT (Back to Live)")
+            self._layout_overlay_buttons()
         else:
             # 擷取整個視窗背後的影像（包含工具列後面的區域）
             dpr = self.devicePixelRatioF()
@@ -275,37 +281,55 @@ class OverlayWindow(QMainWindow):
                     )
                 
             if frame is not None:
-                self._is_frozen = True
-                self._frozen_frame = frame.copy()
+                self._is_static_mode = True
+                self._static_source_type = "frozen"
+                self._source_image = frame.copy()
+                self._full_image_gray = cv2.cvtColor(self._source_image, cv2.COLOR_BGR2GRAY)
+                
+                # 進入靜態模式時重置縮放與偏移
+                self._pan_offset_x = 0
+                self._pan_offset_y = 0
+                self._zoom_factor = 1.0
+                
                 self.panel.freeze_btn.setProperty("freeze_mode", "frozen")
                 self.panel.freeze_btn.style().unpolish(self.panel.freeze_btn)
                 self.panel.freeze_btn.style().polish(self.panel.freeze_btn)
                 self.panel.freeze_btn.setToolTip("點擊解除鎖定 (目前已凍結)")
-                print(f"[Freeze] FROZEN, frame shape={frame.shape}")
+                print(f"[StaticMode] ENTERED via Freeze, shape={frame.shape}")
             else:
                 print("[Freeze] FAILED - no frame available")
         
         self._last_frame_signature = None
         self._is_refreshing = False
+        
+        # 狀態轉換時自動執行一次平衡 (防止切換後畫面階調不正確)
+        self._auto_balance_pending = True
+        self._auto_balance_use_current = True
+        
         self.refresh_frame()
         self.update()
 
     def import_image(self, bgr_image: np.ndarray) -> None:
-        """匯入外部圖片，進入 ImageMode。"""
+        """匯入外部圖片，進入 StaticMode (Image 類型)。"""
         self._source_image = bgr_image.copy()
         self._full_image_gray = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY)
-        self._is_image_mode = True
-        self._is_frozen = True
-        self._frozen_frame = None  # ImageMode 不使用 frozen_frame
+        self._is_static_mode = True
+        self._static_source_type = "image"
+        
         self._pan_offset_x = 0
         self._pan_offset_y = 0
+        self._zoom_factor = 1.0
         self.panel.freeze_btn.setProperty("freeze_mode", "image")
         self.panel.freeze_btn.style().unpolish(self.panel.freeze_btn)
         self.panel.freeze_btn.style().polish(self.panel.freeze_btn)
         self.panel.freeze_btn.setToolTip("點擊退出圖片模式")
         self._last_frame_signature = None
         self._is_refreshing = False
-        print(f"[ImageMode] Imported image: {bgr_image.shape}")
+        print(f"[StaticMode] ENTERED via Import, shape={bgr_image.shape}")
+        self._layout_overlay_buttons()
+        # 匯入時自動執行一次平衡
+        self._auto_balance_pending = True
+        self._auto_balance_use_current = True
         self.refresh_frame()
         self.update()
 
@@ -482,11 +506,16 @@ class OverlayWindow(QMainWindow):
         )
 
     def on_auto_balance_target_requested(self, ratios: tuple[float, float, float]) -> None:
-        if self._last_gray_frame is None or self._last_gray_frame.size == 0:
+        # 決定計算來源：是當前可見的 viewport 還是整張圖片
+        source_gray = self._last_gray_frame
+        if self._is_static_mode and self._use_global_calc and self._full_image_gray is not None:
+            source_gray = self._full_image_gray
+            
+        if source_gray is None or source_gray.size == 0:
             return
             
         lower, upper, exp_value = self._optimize_balance_params(
-            self._last_gray_frame,
+            source_gray,
             ratios,
             self.settings.min_value,
             self.settings.max_value,
@@ -508,9 +537,11 @@ class OverlayWindow(QMainWindow):
         self.update()
 
     def on_auto_continuous_toggled(self, enabled: bool) -> None:
+        """切換持續自動平衡。"""
         self._auto_continuous_enabled = enabled
         self._auto_balance_pending = False # 清除任何待處理的平衡請求
         if enabled:
+            self._global_calc_dirty = True
             self._last_auto_balance_ts = 0.0 # 立即執行一次
             self.request_refresh()
 
@@ -545,14 +576,27 @@ class OverlayWindow(QMainWindow):
         self.panel.raise_()
 
     def _layout_overlay_buttons(self) -> None:
-        if self._compare_mode and hasattr(self, 'btn_compare_bw'):
+        # 黑白對照按鈕 (右側)
+        show_bw = self._compare_mode and self._show_distribution
+        if show_bw:
             c = self._compare_rect()
             if not c.isNull():
-                self.btn_compare_bw.setGeometry(c.right() - 60, c.top() + 6, 54, 24)
-                self.btn_compare_bw.show()
-                self.btn_compare_bw.raise_()
-        elif hasattr(self, 'btn_compare_bw'):
-            self.btn_compare_bw.hide()
+                self._rect_compare_bw = QRect(c.right() - 60, c.top() + 6, 54, 24)
+            else:
+                self._rect_compare_bw = QRect()
+        else:
+            self._rect_compare_bw = QRect()
+
+        # 全圖計算按鈕 (左側)
+        show_global = self._is_static_mode and self._show_distribution
+        if show_global:
+            l = self._lens_rect()
+            if not l.isNull():
+                self._rect_global_calc = QRect(l.left() + 130, l.top() + 6, 80, 24)
+            else:
+                self._rect_global_calc = QRect()
+        else:
+            self._rect_global_calc = QRect()
 
     def _lens_rect(self) -> QRect:
         lens_h = max(40, self.height() - self._panel_height)
@@ -597,6 +641,10 @@ class OverlayWindow(QMainWindow):
         # When active, use minimal delay
         delay = 0 if is_interaction else 100
         self.request_refresh(delay)
+        
+        # 確保懸浮按鈕位置正確
+        if self._is_static_mode and self._stable_frame_count % 10 == 0:
+            self._layout_overlay_buttons()
 
     def _hwnd(self) -> int | None:
         try:
@@ -629,40 +677,62 @@ class OverlayWindow(QMainWindow):
             dpr = self.devicePixelRatioF()
             
             # --- 核心邏輯：決定影像來源 ---
-            if self._is_image_mode and self._source_image is not None:
-                # ImageMode：從完整圖片中按 pan_offset 裁切 viewport
+            if self._is_static_mode and self._source_image is not None:
+                # 靜態分析模式 (Frozen 或 Import)：處理縮放、平移與 Padding
                 src = self._source_image
                 sh, sw = src.shape[:2]
-                view_w = max(1, int(round(rect.width() * dpr)))
-                view_h = max(1, int(round(rect.height() * dpr)))
+                view_w_phys = max(1, int(round(rect.width() * dpr)))
+                view_h_phys = max(1, int(round(rect.height() * dpr)))
                 
-                # 限制 pan_offset 在合法範圍
-                max_ox = max(0, sw - view_w)
-                max_oy = max(0, sh - view_h)
-                ox = max(0, min(self._pan_offset_x, max_ox))
-                oy = max(0, min(self._pan_offset_y, max_oy))
-                self._pan_offset_x, self._pan_offset_y = ox, oy
+                # 最小縮放限制 (確保長邊 1.5x)
+                view_long = max(view_w_phys, view_h_phys)
+                img_long = max(sw, sh)
+                min_zoom = view_long / (1.5 * img_long)
+                if self._zoom_factor < min_zoom:
+                    self._zoom_factor = min_zoom
+
+                vsw = sw * self._zoom_factor
+                vsh = sh * self._zoom_factor
                 
-                # 裁切
-                end_x = min(ox + view_w, sw)
-                end_y = min(oy + view_h, sh)
-                frame = np.ascontiguousarray(src[oy:end_y, ox:end_x])
-                if frame.size == 0:
-                    frame = src
+                # 限制平移偏移 (處理 Padding)
+                if vsw > view_w_phys:
+                    self._pan_offset_x = max(0, min(self._pan_offset_x, vsw - view_w_phys))
+                else:
+                    self._pan_offset_x = (vsw - view_w_phys) / 2
                     
-            elif self._is_frozen and self._frozen_frame is not None:
-                # 凍結模式：從凍結影像裁切
-                frozen = self._frozen_frame
-                fh, fw = frozen.shape[:2]
-                panel_h = int(round(self._panel_height * dpr))
-                crop_y = min(panel_h, fh - 1)
-                crop_h = max(1, fh - crop_y)
-                crop_w = min(fw, max(1, int(round(rect.width() * dpr))))
-                frame = np.ascontiguousarray(frozen[crop_y:crop_y + crop_h, 0:crop_w])
-                if frame.size == 0:
-                    frame = frozen
+                if vsh > view_h_phys:
+                    self._pan_offset_y = max(0, min(self._pan_offset_y, vsh - view_h_phys))
+                else:
+                    self._pan_offset_y = (vsh - view_h_phys) / 2
+                
+                # 裁切並縮放有效像素
+                sx1 = max(0, int(round(self._pan_offset_x / self._zoom_factor)))
+                sy1 = max(0, int(round(self._pan_offset_y / self._zoom_factor)))
+                sx2 = min(sw, int(round((self._pan_offset_x + view_w_phys) / self._zoom_factor)))
+                sy2 = min(sh, int(round((self._pan_offset_y + view_h_phys) / self._zoom_factor)))
+                
+                crop = src[sy1:sy2, sx1:sx2]
+                
+                if crop.size > 0:
+                    target_w = int(round((sx2 - sx1) * self._zoom_factor))
+                    target_h = int(round((sy2 - sy1) * self._zoom_factor))
+                    if target_w > 0 and target_h > 0:
+                        resized_crop = cv2.resize(crop, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+                        frame = np.full((view_h_phys, view_w_phys, 3), 34, dtype=np.uint8)
+                        dx = max(0, int(round(-self._pan_offset_x)))
+                        dy = max(0, int(round(-self._pan_offset_y)))
+                        fh, fw = resized_crop.shape[:2]
+                        frame[dy:dy+fh, dx:dx+fw] = resized_crop[:view_h_phys-dy, :view_w_phys-dx]
+                        # 更新計算用的灰階影像 (排除 Padding)
+                        self._last_gray_frame = cv2.cvtColor(resized_crop, cv2.COLOR_BGR2GRAY)
+                    else:
+                        frame = np.full((view_h_phys, view_w_phys, 3), 34, dtype=np.uint8)
+                        self._last_gray_frame = None
+                else:
+                    frame = np.full((view_h_phys, view_w_phys, 3), 34, dtype=np.uint8)
+                    self._last_gray_frame = None
             else:
-                # 即時模式：從螢幕擷取
+                # 即時模式 (Live)：從螢幕擷取
                 phys = self._physical_window_rect()
                 if phys is not None:
                     win_x, win_y, win_pw, win_ph = phys
@@ -777,12 +847,24 @@ class OverlayWindow(QMainWindow):
                 else:
                     self.on_auto_balance_raw_requested()
             elif self._auto_continuous_enabled:
-                now = time.monotonic()
-                if now - self._last_auto_balance_ts > 0.15:
-                    self._last_auto_balance_ts = now
-                    current_target = self.panel.balance_presets.currentData()
-                    if current_target:
-                        self.on_auto_balance_target_requested(current_target)
+                # 如果開啟了「計算全圖」，且數據來源是靜態的 (StaticMode)，則只需計算一次
+                if self._is_static_mode and self._use_global_calc:
+                    if self._global_calc_dirty:
+                        self._global_calc_dirty = False
+                        current_target = self.panel.balance_presets.currentData()
+                        if current_target:
+                            self.on_auto_balance_target_requested(current_target)
+                        else:
+                            self.on_auto_balance_raw_requested()
+                else:
+                    # 情況 A: 即時模式 (Live)
+                    # 情況 B: 靜態模式但關閉全圖計算 (Local) -> 隨縮放/平移持續追蹤
+                    now = time.monotonic()
+                    if now - self._last_auto_balance_ts > 0.15:
+                        self._last_auto_balance_ts = now
+                        current_target = self.panel.balance_presets.currentData()
+                        if current_target:
+                            self.on_auto_balance_target_requested(current_target)
         finally:
 
             self._is_refreshing = False
@@ -819,6 +901,21 @@ class OverlayWindow(QMainWindow):
             painter.drawRect(compare.adjusted(0, 0, -1, -1))
             if self._show_distribution:
                 self._draw_distribution_overlay(painter, compare, self._raw_distribution_pct, "原始")
+                
+        # --- 繪製手動按鈕 ---
+        if not self._rect_compare_bw.isNull():
+            self._draw_manual_button(painter, self._rect_compare_bw, "黑白", self.settings.compare_bw)
+        if not self._rect_global_calc.isNull():
+            self._draw_manual_button(painter, self._rect_global_calc, "計算全圖", self._use_global_calc)
+
+    def _draw_manual_button(self, painter: QPainter, rect: QRect, text: str, checked: bool) -> None:
+        """手動繪製一個看起來像 QToolButton 的按鈕。"""
+        bg_color = QColor(46, 123, 246) if checked else QColor(0, 0, 0, 150)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.GlobalColor.white)
+        painter.setBrush(bg_color)
+        painter.drawRoundedRect(rect, 4, 4)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
     def _calc_balance_distribution(self, gray: np.ndarray | None) -> tuple[float, float, float]:
         if gray is None or gray.size == 0:
@@ -1106,11 +1203,30 @@ class OverlayWindow(QMainWindow):
                 self._resize_start_geom = self.geometry()
                 event.accept()
                 return
-            if self.panel.isVisible() and self.panel.geometry().contains(pos):
-                super().mousePressEvent(event)
+            # 檢查是否點擊到控制面板
+            target = self.childAt(pos)
+            if target:
+                curr = target
+                while curr:
+                    if curr == self.panel:
+                        super().mousePressEvent(event)
+                        return
+                    curr = curr.parentWidget()
+            
+            # 檢查手動按鈕點擊 (優先於平移)
+            if not self._rect_compare_bw.isNull() and self._rect_compare_bw.contains(pos):
+                self.on_compare_bw_changed(not self.settings.compare_bw)
+                self.update()
+                event.accept()
                 return
-            # ImageMode 下鏡片區域 → 平移圖片
-            if self._is_image_mode and self._source_image is not None:
+            if not self._rect_global_calc.isNull() and self._rect_global_calc.contains(pos):
+                self.on_global_calc_toggled(not self._use_global_calc)
+                self.update()
+                event.accept()
+                return
+
+            # 靜態模式 (StaticMode) 下鏡片區域 → 平移圖片
+            if self._is_static_mode and self._source_image is not None:
                 lens = self._lens_rect()
                 if lens.contains(pos) or (self._compare_mode and self._compare_rect().contains(pos)):
                     self._pan_drag_start = event.globalPosition().toPoint()
@@ -1147,9 +1263,10 @@ class OverlayWindow(QMainWindow):
 
         # ImageMode 平移圖片
         if self._pan_drag_start is not None and self._pan_start_offset is not None:
+            dpr = self.devicePixelRatioF()
             delta = self._pan_drag_start - event.globalPosition().toPoint()
-            self._pan_offset_x = self._pan_start_offset[0] + delta.x()
-            self._pan_offset_y = self._pan_start_offset[1] + delta.y()
+            self._pan_offset_x = self._pan_start_offset[0] + delta.x() * dpr
+            self._pan_offset_y = self._pan_start_offset[1] + delta.y() * dpr
             self._last_frame_signature = None
             self._is_refreshing = False
             self.refresh_frame()
@@ -1198,6 +1315,59 @@ class OverlayWindow(QMainWindow):
         self._last_frame_signature = None
         self._boost_motion(1.5)
         self.request_refresh(80)
+
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        if not self._is_static_mode or self._source_image is None:
+            super().wheelEvent(event)
+            return
+
+        source = self._source_image
+
+        # 鏡片區域內的縮放
+        pos = event.position().toPoint()
+        lens = self._lens_rect()
+        compare = self._compare_rect()
+        
+        in_lens = lens.contains(pos)
+        in_compare = self._compare_mode and compare.contains(pos)
+        
+        if in_lens or in_compare:
+            # 決定縮放中心 (相對於鏡片左上角)
+            rel_pos = pos - (lens.topLeft() if in_lens else compare.topLeft())
+            dpr = self.devicePixelRatioF()
+            mx, my = rel_pos.x() * dpr, rel_pos.y() * dpr
+            
+            # 計算新的縮放倍率
+            angle = event.angleDelta().y()
+            zoom_step = 1.15 if angle > 0 else (1.0 / 1.15)
+            old_zoom = self._zoom_factor
+            
+            # 計算最小縮放限制：視窗長邊 = 1.5 * 圖片長邊
+            # 換言之：圖片長邊 = 視窗長邊 / 1.5 (確保容納全圖)
+            sh, sw = source.shape[:2]
+            view_w_phys = max(1, int(round(self.width() * dpr)))
+            view_h_phys = max(1, int(round((self.height() - self._panel_height) * dpr)))
+            view_long = max(view_w_phys, view_h_phys)
+            img_long = max(sw, sh)
+            
+            min_zoom = view_long / (1.5 * img_long)
+            max_zoom = 20.0
+            
+            new_zoom = max(min_zoom, min(max_zoom, old_zoom * zoom_step))
+            
+            if new_zoom != old_zoom:
+                # 調整 pan_offset 讓縮放中心保持在滑鼠位置
+                # 公式：new_offset = (old_offset + mouse_pos) * (new_zoom / old_zoom) - mouse_pos
+                self._pan_offset_x = (self._pan_offset_x + mx) * (new_zoom / old_zoom) - mx
+                self._pan_offset_y = (self._pan_offset_y + my) * (new_zoom / old_zoom) - my
+                self._zoom_factor = new_zoom
+                
+                self._last_frame_signature = None
+                self._is_refreshing = False
+                self.refresh_frame()
+            event.accept()
+        else:
+            super().wheelEvent(event)
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         if event.key() == Qt.Key.Key_Escape:
