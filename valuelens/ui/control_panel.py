@@ -128,6 +128,7 @@ class ControlPanel(QWidget):
     debug_screenshot_requested = Signal()
     save_startup_requested = Signal()
     clear_startup_requested = Signal()
+    maximize_requested = Signal()
 
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
@@ -209,13 +210,19 @@ class ControlPanel(QWidget):
         self.min_btn.setToolTip("最小化")
         self.min_btn.setFixedWidth(34)
 
+        self.max_btn = QToolButton()
+        self.max_btn.setObjectName("gl_winbtn")
+        self.max_btn.setText("□")  # 使用更簡單的方塊圖示
+        self.max_btn.setToolTip("最大化/還原")
+        self.max_btn.setFixedWidth(34)
+
         self.close_btn = QToolButton()
         self.close_btn.setObjectName("gl_closebtn")
         self.close_btn.setProperty("class", "gl_winbtn")
         self.close_btn.setText("×")
         self.close_btn.setToolTip("結束")
         self.close_btn.setFixedWidth(34)
-        self.close_btn.setStyleSheet("QToolButton { border: none; padding: 0; font-weight: bold; }")
+        self.close_btn.setStyleSheet("QToolButton { border: none; padding: 0; font-weight: bold; font-size: 11pt; }")
 
         self.freeze_btn = QToolButton()
         self.freeze_btn.setText("🧊")
@@ -332,6 +339,7 @@ class ControlPanel(QWidget):
         top_layout.addWidget(self.more_btn)
         top_layout.addSpacing(10)
         top_layout.addWidget(self.min_btn)
+        top_layout.addWidget(self.max_btn)
         top_layout.addWidget(self.close_btn)
 
         self.top_row_widget = QWidget()
@@ -405,6 +413,7 @@ class ControlPanel(QWidget):
         self.debug_screenshot_action.triggered.connect(self.debug_screenshot_requested.emit)
         self.quit_action.triggered.connect(self.quit_requested.emit)
         self.min_btn.clicked.connect(self.minimize_requested.emit)
+        self.max_btn.clicked.connect(self.maximize_requested.emit)
         self.close_btn.clicked.connect(self.quit_requested.emit)
         self.balance_presets.currentIndexChanged.connect(self._request_target_auto_balance)
         self.balance_raw_btn.clicked.connect(self._request_raw_auto_balance)

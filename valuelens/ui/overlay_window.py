@@ -190,6 +190,7 @@ class OverlayWindow(QMainWindow):
         self.panel.bypass_toggled.connect(self.on_bypass_toggled)
         self.panel.quit_requested.connect(self.force_quit)
         self.panel.minimize_requested.connect(self.showMinimized)
+        self.panel.maximize_requested.connect(self.toggle_maximize)
         self.panel.drag_started.connect(self._start_drag_from_panel)
         self.panel.save_startup_requested.connect(self.on_save_startup_preset)
         self.panel.clear_startup_requested.connect(self.on_clear_startup_preset)
@@ -1281,8 +1282,50 @@ class OverlayWindow(QMainWindow):
         return Qt.CursorShape.ArrowCursor
 
     def _start_drag_from_panel(self, global_point: QPoint) -> None:
+        if self.isMaximized():
+            # 記錄最大化之前的寬度比例，以便還原時鼠標能落在相對位置
+            old_width = self.width()
+            self.toggle_maximize()
+            new_width = self.width()
+            # 調整 drag_pos 讓滑鼠在還原後依然抓在標題列上的對應比例位置
+            ratio = global_point.x() / old_width
+            self.move(global_point.x() - int(new_width * ratio), global_point.y() - 15)
+            
         self._is_dragging = True
         self._drag_pos = global_point - self.frameGeometry().topLeft()
+
+    def toggle_maximize(self) -> None:
+        """切換視窗最大化或還原狀態。"""
+        if self.isMaximized():
+            self.showNormal()
+            self.panel.max_btn.setText("□")
+        else:
+            self.showMaximized()
+            self.panel.max_btn.setText("❐")
+        self._last_frame_signature = None
+        self.request_refresh(50)
+
+    def changeEvent(self, event) -> None:  # type: ignore[override]
+        """監聽視窗狀態改變（如透過系統熱鍵或拖曳最大化），同步按鈕圖示。"""
+        from PySide6.QtCore import QEvent
+        if event.type() == QEvent.Type.WindowStateChange:
+            if self.isMaximized():
+                self.panel.max_btn.setText("❐")
+            else:
+                self.panel.max_btn.setText("□")
+        super().changeEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
+        """雙擊工具列標題區域時切換最大化。"""
+        pos = event.position().toPoint()
+        if self.panel.geometry().contains(pos):
+            child = self.childAt(pos)
+            # 如果是點擊到按鈕以外的空白處、Layout、或是標籤，則觸發最大化
+            if child in (None, self.panel, self.panel.top_row_widget, self.panel.extra_container) or isinstance(child, QLabel):
+                self.toggle_maximize()
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1368,8 +1411,13 @@ class OverlayWindow(QMainWindow):
         self.request_refresh(0)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
-        self._drag_pos = None
+        if self._is_dragging:
+            # 模擬 Windows Snap: 如果釋放時滑鼠靠近螢幕頂端，則觸發最大化
+            if event.globalPosition().y() < 10:
+                if not self.isMaximized():
+                    self.toggle_maximize()
         self._is_dragging = False
+        super().mouseReleaseEvent(event)
         self._is_resizing = False
         self._resize_edges = 0
         self._resize_start_geom = None
