@@ -129,6 +129,7 @@ class ControlPanel(QWidget):
     save_startup_requested = Signal()
     clear_startup_requested = Signal()
     maximize_requested = Signal()
+    recording_window_toggled = Signal(bool)
 
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
@@ -252,6 +253,12 @@ class ControlPanel(QWidget):
         self.bypass_btn.setCheckable(True)
         self.bypass_btn.setChecked(False)
         self.bypass_btn.toggled.connect(self._on_bypass_toggled)
+        
+        self.record_btn = QToolButton()
+        self.record_btn.setText("🎥")
+        self.record_btn.setCheckable(True)
+        self.record_btn.setToolTip("開啟/關閉 錄製專用鏡像視窗 (非透明)")
+        self.record_btn.toggled.connect(self.recording_window_toggled.emit)
 
         self.balance_raw_btn = QToolButton()
         self.balance_raw_btn.setText("重新平衡")
@@ -334,6 +341,7 @@ class ControlPanel(QWidget):
         top_layout.addWidget(self.image_mode_btn)
         top_layout.addWidget(self.distribution_btn)
         top_layout.addWidget(self.bypass_btn)
+        top_layout.addWidget(self.record_btn)
         top_layout.addStretch(1)
         top_layout.addWidget(self.collapse_btn)
         top_layout.addWidget(self.more_btn)
@@ -418,6 +426,7 @@ class ControlPanel(QWidget):
         self.balance_presets.currentIndexChanged.connect(self._request_target_auto_balance)
         self.balance_raw_btn.clicked.connect(self._request_raw_auto_balance)
         self.auto_continuous_check.toggled.connect(self.auto_continuous_toggled.emit)
+        self.logic_reset_btn.clicked.connect(self._reset_logic_settings)
         self.display_reset_btn.clicked.connect(self._reset_display_settings)
         self.save_startup_action.triggered.connect(self.save_startup_requested.emit)
         self.clear_startup_action.triggered.connect(self.clear_startup_requested.emit)
@@ -527,11 +536,11 @@ class ControlPanel(QWidget):
         self.balance_presets.clear()
 
         if n == 2:
-            base = (30.0, 0.0, 70.0)
-            # n=2 時，我們只想要 (30,0,70) 和 (70,0,30) 這種灰色為 0 的排列
-            presets = [(70.0, 0.0, 30.0), (30.0, 0.0, 70.0)]
+            base = _RATIO_2
+            # n=2 時，我們只想要灰色為 0 的排列
+            presets = [(base[0], 0.0, base[2]), (base[2], 0.0, base[0])]
         else:
-            base = (70.0, 20.0, 10.0)
+            base = _RATIO_3PLUS
             # n>=3 時，取得所有 6 種排列組合
             presets = sorted(list(set(itertools.permutations(base))), reverse=True)
         

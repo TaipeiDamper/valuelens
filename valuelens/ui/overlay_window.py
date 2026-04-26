@@ -18,6 +18,7 @@ from valuelens.core.hotkey_service import HotkeyService
 from valuelens.core.quantize import quantize_gray, quantize_gray_with_indices
 from valuelens.modes.image_mode import ImageModeDialog
 from valuelens.ui.control_panel import ControlPanel
+from valuelens.ui.mirror_window import MirrorWindow
 
 
 _RESIZE_MARGIN = 12
@@ -29,46 +30,6 @@ _EDGE_RIGHT = 2
 _EDGE_TOP = 4
 _EDGE_BOTTOM = 8
 
-_RANGE_PRESETS: tuple[tuple[int, int], ...] = (
-    (0, 255),
-    (0, 248),
-    (0, 224),
-    (0, 208),
-    (0, 192),
-    (8, 255),
-    (16, 240),
-    (16, 224),
-    (24, 255),
-    (24, 224),
-    (32, 224),
-    (32, 208),
-    (40, 208),
-    (48, 240),
-    (56, 224),
-    (64, 255),
-    (72, 240),
-    (80, 224),
-    (88, 248),
-    (96, 240),
-    (104, 248),
-    (112, 255),
-)
-_EXP_PRESETS: tuple[float, ...] = (-1.5, -1.0, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0)
-_EXP_COARSE_GRID: tuple[float, ...] = (
-    -2.0,
-    -1.5,
-    -1.0,
-    -0.75,
-    -0.5,
-    -0.25,
-    0.0,
-    0.25,
-    0.5,
-    0.75,
-    1.0,
-    1.5,
-    2.0,
-)
 
 
 class _RECT(ctypes.Structure):
@@ -134,8 +95,7 @@ class OverlayWindow(QMainWindow):
         self._refresh_ms = 33             # 固定 30 FPS
         self._fps_count = 0                # FPS 計數
         self._fps_last_report = time.time() # 上次報告時間
-        self._last_capture_rect: tuple[int, int, int, int] | None = None
-        self._last_frame_signature: bytes | None = None
+        self._last_frame_signature = None
         self._stable_frame_count = 0
         self._compare_mode = bool(settings.compare_mode)
         self._processed_distribution_pct = [0.0] * max(2, int(settings.levels))
@@ -163,6 +123,7 @@ class OverlayWindow(QMainWindow):
         self._global_calc_dirty = False    # 標記全圖計算是否需要重新執行一次
         self._last_auto_balance_ts = 0.0
         self._last_raw_bgr_frame = None
+        self._mirror_window: MirrorWindow | None = None
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._on_timer_tick)
@@ -195,6 +156,7 @@ class OverlayWindow(QMainWindow):
         self.panel.save_startup_requested.connect(self.on_save_startup_preset)
         self.panel.clear_startup_requested.connect(self.on_clear_startup_preset)
         self.panel.debug_screenshot_requested.connect(self.on_debug_screenshot_requested)
+        self.panel.recording_window_toggled.connect(self.on_recording_window_toggled)
         self.panel.show()
         self.panel.raise_()
         self._layout_panel()
@@ -233,13 +195,24 @@ class OverlayWindow(QMainWindow):
         self._auto_balance_use_current = True
         self.request_refresh(5)
         self.update()
-
     def on_bypass_toggled(self, bypass: bool) -> None:
         """切換 Bypass 模式：跳過所有處理，顯示原始影像。"""
         self._bypass_mode = bypass
         self._last_frame_signature = None
         self.refresh_frame()
         self.update()
+
+
+    def on_recording_window_toggled(self, enabled: bool) -> None:
+        """開啟或關閉錄製鏡像視窗。"""
+        if enabled:
+            if self._mirror_window is None:
+                self._mirror_window = MirrorWindow()
+            self._mirror_window.show()
+            self._mirror_window.raise_()
+        else:
+            if self._mirror_window:
+                self._mirror_window.hide()
 
     def on_screenshot_requested(self) -> None:
         """擷取鏡片區域（Lens Area）內容並存入剪貼簿。"""
@@ -524,7 +497,6 @@ class OverlayWindow(QMainWindow):
         
         # 面板收合會導致鏡片區域 (lens rect) 大小與物理座標改變
         # 我們必須清除快取，強制下一幀重新計算
-        self._last_capture_rect = None
         self._last_frame_signature = None
         
         self.request_refresh(10)
@@ -727,11 +699,10 @@ class OverlayWindow(QMainWindow):
         self._fps_count += 1
         now = time.time()
         if now - self._fps_last_report >= 5.0:
-            avg_fps = self._fps_count / (now - self._fps_last_report)
-            print(f"[Performance] Avg FPS over last 5s: {avg_fps:.2f}")
             self._fps_count = 0
             self._fps_last_report = now
 
+        self._stable_frame_count += 1
         self._is_refreshing = True
         try:
             # 1. 座標與參數準備
@@ -964,8 +935,13 @@ class OverlayWindow(QMainWindow):
                         if current_target:
                             self.on_auto_balance_target_requested(current_target)
         finally:
-
             self._is_refreshing = False
+            
+            # 如果錄製視窗開啟中，則將完整的視窗內容「照翻」過去
+            if self._mirror_window and self._mirror_window.isVisible():
+                # 使用 grab 擷取整個視窗（含工具列）
+                pix = self.grab()
+                self._mirror_window.update_frame(pix)
 
     @staticmethod
     def _frame_signature(frame: np.ndarray) -> bytes:
@@ -1015,15 +991,6 @@ class OverlayWindow(QMainWindow):
         painter.drawRoundedRect(rect, 4, 4)
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
-    def _calc_balance_distribution(self, gray: np.ndarray | None) -> tuple[float, float, float]:
-        if gray is None or gray.size == 0:
-            return (0.0, 0.0, 0.0)
-        low = float(np.mean(gray < self.settings.min_value) * 100.0)
-        mid = float(
-            np.mean((gray >= self.settings.min_value) & (gray <= self.settings.max_value)) * 100.0
-        )
-        high = max(0.0, 100.0 - low - mid)
-        return (low, mid, high)
 
     @staticmethod
     def _calc_level_distribution(gray: np.ndarray | None, levels: int) -> list[float]:
@@ -1059,16 +1026,6 @@ class OverlayWindow(QMainWindow):
             return [0.0] * level_count
         return ((counts / total) * 100.0).tolist()
 
-
-    @staticmethod
-    def _closest_target_ratios(
-        base_ratios: tuple[float, float, float], current: tuple[float, float, float]
-    ) -> tuple[float, float, float]:
-        candidates = list(itertools.permutations(base_ratios))
-        return min(
-            candidates,
-            key=lambda cand: sum((float(cand[i]) - float(current[i])) ** 2 for i in range(3)),
-        )
 
     @staticmethod
     def _levels_to_wgb(values: list[float]) -> tuple[float, float, float]:
@@ -1217,21 +1174,6 @@ class OverlayWindow(QMainWindow):
         mid = float(np.sum(counts[edge1:edge2]) / total)
         high = float(np.sum(counts[edge2:]) / total)
         return np.array([low, mid, high], dtype=np.float64)
-
-    def _calc_processed_three_distribution(
-        self, gray: np.ndarray | None, lower: int, upper: int, exp_value: float
-    ) -> tuple[float, float, float]:
-        if gray is None or gray.size == 0:
-            return (0.0, 0.0, 0.0)
-        levels = max(2, int(self.settings.levels))
-        hist = np.bincount(gray.reshape(-1).astype(np.uint8), minlength=256).astype(np.float64)
-        ratios = self._distribution_from_hist(hist, lower, upper, levels, exp_value)
-        if np.sum(ratios) <= 0:
-            return (0.0, 0.0, 0.0)
-        low = float(ratios[0] * 100.0)
-        mid = float(ratios[1] * 100.0)
-        high = float(ratios[2] * 100.0)
-        return (low, mid, high)
 
     def _draw_distribution_overlay(
         self, painter: QPainter, rect: QRect, values: list[float], title: str
