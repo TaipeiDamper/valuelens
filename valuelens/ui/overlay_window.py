@@ -85,6 +85,11 @@ class OverlayWindow(QMainWindow):
         super().__init__()
         self.settings = settings
         self.settings_manager = SettingsManager()
+        
+        # 如果有啟動預設集，則在此處套用它
+        if self.settings.startup_preset:
+            self._apply_startup_preset(self.settings.startup_preset)
+
         self.capture = CaptureService()
         self.hotkeys = HotkeyService()
         self.image_mode = ImageModeDialog(
@@ -186,6 +191,9 @@ class OverlayWindow(QMainWindow):
         self.panel.quit_requested.connect(self.force_quit)
         self.panel.minimize_requested.connect(self.showMinimized)
         self.panel.drag_started.connect(self._start_drag_from_panel)
+        self.panel.save_startup_requested.connect(self.on_save_startup_preset)
+        self.panel.clear_startup_requested.connect(self.on_clear_startup_preset)
+        self.panel.debug_screenshot_requested.connect(self.on_debug_screenshot_requested)
         self.panel.show()
         self.panel.raise_()
         self._layout_panel()
@@ -233,7 +241,7 @@ class OverlayWindow(QMainWindow):
         self.update()
 
     def on_screenshot_requested(self) -> None:
-        """擷取當前畫面並存入剪貼簿。"""
+        """擷取鏡片區域（Lens Area）內容並存入剪貼簿。"""
         from PySide6.QtWidgets import QApplication
         cb = QApplication.clipboard()
         
@@ -247,6 +255,64 @@ class OverlayWindow(QMainWindow):
             pix = self.grab(self._lens_rect())
             
         cb.setPixmap(pix)
+
+    def on_debug_screenshot_requested(self) -> None:
+        """偵錯模式：從系統層級擷取全螢幕（強制包含 ValueLens 視窗本身）。"""
+        from PySide6.QtWidgets import QApplication
+        import time
+        import ctypes
+        
+        # 1. 強制解除隱身 (確保 Windows DWM 將其納入擷取範圍)
+        hwnd = self.effectiveWinId()
+        if hwnd:
+            # WDA_NONE = 0
+            ctypes.windll.user32.SetWindowDisplayAffinity(int(hwnd), 0)
+        
+        # 2. 強制重繪並等待 DWM 生效
+        self.update()
+        QApplication.processEvents()
+        time.sleep(0.3)  # 給 DWM 稍長時間反應
+
+        # 3. 擷取螢幕 (利用 MSS 擷取主螢幕)
+        sct = self.capture._sct
+        monitor = sct.monitors[0]  # 抓取整個虛擬螢幕 (All monitors)
+        shot = sct.grab(monitor)
+        
+        from PySide6.QtGui import QImage, QPixmap
+        img = QImage(shot.raw, shot.width, shot.height, QImage.Format.Format_ARGB32)
+        pix = QPixmap.fromImage(img)
+
+        # 4. 存入剪貼簿
+        cb = QApplication.clipboard()
+        cb.setPixmap(pix)
+        print("[Debug] Full screen (including window) captured to clipboard.")
+        
+        # 5. 下一輪 refresh 會自動根據 CaptureService 恢復隱身狀態
+
+    def on_save_startup_preset(self) -> None:
+        """將目前的所有參數儲存為啟動預設。"""
+        from dataclasses import asdict
+        # 排除非參數類的欄位 (如視窗位置 x, y)
+        current = asdict(self.settings)
+        excluded = {'x', 'y', 'width', 'height', 'startup_preset', 'enabled'}
+        preset = {k: v for k, v in current.items() if k not in excluded}
+        
+        self.settings.startup_preset = preset
+        self.settings_manager.save(self.settings)
+        print("[Presets] Current configuration saved as Startup Preset.")
+
+    def on_clear_startup_preset(self) -> None:
+        """清除啟動預設，改回恢復上次關閉狀態。"""
+        self.settings.startup_preset = None
+        self.settings_manager.save(self.settings)
+        print("[Presets] Startup Preset cleared.")
+
+    def _apply_startup_preset(self, preset: dict) -> None:
+        """將預設集的資料填充進目前的 settings 物件中。"""
+        for k, v in preset.items():
+            if hasattr(self.settings, k):
+                setattr(self.settings, k, v)
+        print("[Presets] Startup Preset applied.")
 
     def toggle_freeze_mode(self) -> None:
         """切換凍結模式：鎖定當前畫面或恢復即時擷取。同時處理 ImageMode 釋放。"""

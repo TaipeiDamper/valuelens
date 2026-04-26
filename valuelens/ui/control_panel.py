@@ -125,6 +125,9 @@ class ControlPanel(QWidget):
     auto_balance_target_requested = Signal(tuple)
     auto_continuous_toggled = Signal(bool)
     edge_settings_changed = Signal(bool, int, int)
+    debug_screenshot_requested = Signal()
+    save_startup_requested = Signal()
+    clear_startup_requested = Signal()
 
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
@@ -178,11 +181,24 @@ class ControlPanel(QWidget):
         self.more_btn.setToolTip("選單")
 
         more_menu = QMenu(self.more_btn)
+        
+        # 預設集子選單
+        self.preset_menu = QMenu("預設集 (Presets)", self)
+        self.save_startup_action = QAction("儲存目前設定為「啟動預設」", self)
+        self.clear_startup_action = QAction("清除並恢復「上次關閉狀態」", self)
+        self.preset_menu.addAction(self.save_startup_action)
+        self.preset_menu.addAction(self.clear_startup_action)
+        
         self.image_mode_action = QAction("圖片模式", self)
         self.hotkey_action = QAction(f"設定快捷鍵 ({settings.hotkey})", self)
+        self.debug_screenshot_action = QAction("偵錯：擷取全螢幕 (含視窗)", self)
         self.quit_action = QAction("結束程式", self)
+        
+        more_menu.addMenu(self.preset_menu)
+        more_menu.addSeparator()
         more_menu.addAction(self.image_mode_action)
         more_menu.addAction(self.hotkey_action)
+        more_menu.addAction(self.debug_screenshot_action)
         more_menu.addSeparator()
         more_menu.addAction(self.quit_action)
         self.more_btn.setMenu(more_menu)
@@ -386,14 +402,16 @@ class ControlPanel(QWidget):
         self.edge_mix_slider.valueChanged.connect(self._emit_edge_settings)
         self.image_mode_action.triggered.connect(self.image_mode_requested.emit)
         self.hotkey_action.triggered.connect(self._prompt_hotkey)
+        self.debug_screenshot_action.triggered.connect(self.debug_screenshot_requested.emit)
         self.quit_action.triggered.connect(self.quit_requested.emit)
         self.min_btn.clicked.connect(self.minimize_requested.emit)
         self.close_btn.clicked.connect(self.quit_requested.emit)
         self.balance_presets.currentIndexChanged.connect(self._request_target_auto_balance)
         self.balance_raw_btn.clicked.connect(self._request_raw_auto_balance)
         self.auto_continuous_check.toggled.connect(self.auto_continuous_toggled.emit)
-        self.logic_reset_btn.clicked.connect(self._reset_logic_settings)
         self.display_reset_btn.clicked.connect(self._reset_display_settings)
+        self.save_startup_action.triggered.connect(self.save_startup_requested.emit)
+        self.clear_startup_action.triggered.connect(self.clear_startup_requested.emit)
 
     def _on_collapse_toggled(self, checked: bool) -> None:
         if checked:

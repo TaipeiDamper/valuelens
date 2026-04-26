@@ -33,6 +33,7 @@ class AppSettings:
     y: int = 200
     width: int = 640
     height: int = 360
+    startup_preset: dict | None = None
 
 
 class SettingsManager:
