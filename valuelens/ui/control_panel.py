@@ -55,6 +55,14 @@ QComboBox {
     padding: 2px 6px; 
 }
 QComboBox::drop-down { border: none; }
+QComboBox QAbstractItemView {
+    background-color: #2d2d30;
+    color: #eee;
+    selection-background-color: #2e7bf6;
+    selection-color: white;
+    border: 1px solid #444;
+    outline: none;
+}
 
 QCheckBox { color: #ccc; background: transparent; spacing: 6px; }
 QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #555;
