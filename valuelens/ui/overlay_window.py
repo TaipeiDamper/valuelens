@@ -71,6 +71,18 @@ class OverlayWindow(QMainWindow):
         self.image_mode.set_import_callback(self._get_current_raw_frame)
 
         self.setGeometry(settings.x, settings.y, settings.width, settings.height)
+        
+        # 啟動安全性檢查：如果視窗完全在螢幕外，則自動居中
+        from PySide6.QtGui import QGuiApplication
+        visible = False
+        window_rect = QRect(settings.x, settings.y, settings.width, settings.height)
+        for screen in QGuiApplication.screens():
+            if screen.geometry().intersects(window_rect):
+                visible = True
+                break
+        if not visible:
+            QTimer.singleShot(0, self.center_window)
+
         self.setMinimumSize(_MIN_WIDTH, _MIN_HEIGHT)
         self.setWindowTitle("ValueLens")
         self.setWindowFlags(
@@ -128,6 +140,10 @@ class OverlayWindow(QMainWindow):
         self._last_raw_bgr_frame = None
         self._mirror_window: MirrorWindow | None = None
 
+        self._snap_timer = QTimer(self)
+        self._snap_timer.setSingleShot(True)
+        self._snap_timer.timeout.connect(self._on_snap_timeout)
+
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._on_timer_tick)
         self.timer.start(self._refresh_ms)
@@ -169,6 +185,7 @@ class OverlayWindow(QMainWindow):
         self.hotkeys.register("toggle", self.settings.hotkey, self.toggle_enabled)
         self.hotkeys.register("image_mode", "ctrl+alt+i", self.open_image_mode)
         self.hotkeys.register("collapse", "ctrl+alt+p", lambda: self.panel.collapse_btn.toggle())
+        self.hotkeys.register("center", "ctrl+alt+home", self.center_window)
         self.hotkeys.register("quit", "ctrl+alt+q", self.force_quit)
 
         # 拖放支援
@@ -621,6 +638,26 @@ class OverlayWindow(QMainWindow):
         self.panel.set_balance_preset(target_wgb, mark_best=True)
         self.on_auto_balance_target_requested(target_wgb)
 
+    def center_window(self) -> None:
+        """將視窗移至目前螢幕的中央 (用於視窗跳出螢幕外時找回)。"""
+        from PySide6.QtGui import QGuiApplication
+        # 優先找滑鼠所在螢幕，若找不著則找視窗所在，再者主螢幕
+        screen = QGuiApplication.screenAt(self.cursor().pos())
+        if not screen:
+            screen = self.screen()
+        if not screen:
+            screen = QGuiApplication.primaryScreen()
+            
+        if screen:
+            geo = screen.availableGeometry()
+            # 確保視窗不會大於螢幕
+            w = min(self.width(), geo.width() - 40)
+            h = min(self.height(), geo.height() - 40)
+            x = geo.x() + (geo.width() - w) // 2
+            y = geo.y() + (geo.height() - h) // 2
+            self.setGeometry(x, y, w, h)
+            print(f"[Window] Reset position to center: {x}, {y} on screen {screen.name()}")
+
     def toggle_enabled(self) -> None:
         now = time.monotonic()
         if now - self._last_toggle_ts < 0.25:
@@ -970,6 +1007,11 @@ class OverlayWindow(QMainWindow):
             painter.setPen(Qt.GlobalColor.darkGray)
             divider_x = lens.right() + (self._compare_gap // 2) + 1
             painter.drawLine(divider_x, lens.y(), divider_x, lens.bottom())
+        
+        # --- 繪製全視窗外框 (防止視窗在全黑背景下看不見) ---
+        painter.setPen(QColor(100, 100, 100, 180)) # 灰色半透明邊框
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+
         painter.setPen(Qt.GlobalColor.white)
         painter.drawRect(lens.adjusted(0, 0, -1, -1))
         if self._show_distribution:
@@ -1253,6 +1295,13 @@ class OverlayWindow(QMainWindow):
         self._last_frame_signature = None
         self.request_refresh(50)
 
+    def _on_snap_timeout(self) -> None:
+        """當拖曳至邊緣超過時限，觸發全螢幕。"""
+        if self._is_dragging and not self.isMaximized():
+            self.toggle_maximize()
+            self._is_dragging = False
+            self._snap_timer.stop()
+
     def changeEvent(self, event) -> None:  # type: ignore[override]
         """監聽視窗狀態改變（如透過系統熱鍵或拖曳最大化），同步按鈕圖示。"""
         from PySide6.QtCore import QEvent
@@ -1276,6 +1325,13 @@ class OverlayWindow(QMainWindow):
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        # 允許滑鼠中鍵在任何地方拖動視窗 (解決 StaticMode 下左鍵被平移佔用的問題)
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._is_dragging = True
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+            return
+
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
             edges = self._edges_at(pos)
@@ -1308,7 +1364,7 @@ class OverlayWindow(QMainWindow):
                 event.accept()
                 return
 
-            # 靜態模式 (StaticMode) 下鏡片區域 → 平移圖片
+            # 靜態模式 (StaticMode) 下鏡片區域 → 左鍵平移圖片
             if self._is_static_mode and self._source_image is not None:
                 lens = self._lens_rect()
                 if lens.contains(pos) or (self._compare_mode and self._compare_rect().contains(pos)):
@@ -1321,7 +1377,8 @@ class OverlayWindow(QMainWindow):
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
         pos = event.position().toPoint()
-        if not (event.buttons() & Qt.MouseButton.LeftButton):
+        # 檢查是否按下了左鍵或中鍵
+        if not (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.MiddleButton)):
             self.setCursor(self._cursor_for_edges(self._edges_at(pos)))
             return
 
@@ -1342,8 +1399,8 @@ class OverlayWindow(QMainWindow):
             self.request_refresh(0)
             return
 
-        # ImageMode 平移圖片
-        if self._pan_drag_start is not None and self._pan_start_offset is not None:
+        # ImageMode 平移圖片 (僅限左鍵)
+        if (event.buttons() & Qt.MouseButton.LeftButton) and self._pan_drag_start is not None and self._pan_start_offset is not None:
             dpr = self.devicePixelRatioF()
             delta = self._pan_drag_start - event.globalPosition().toPoint()
             self._pan_offset_x = self._pan_start_offset[0] + delta.x() * dpr
@@ -1355,15 +1412,38 @@ class OverlayWindow(QMainWindow):
 
         if self._drag_pos is None:
             return
-        self.move(event.globalPosition().toPoint() - self._drag_pos)
+        
+        # 處理 Windows Snap 邏輯：檢查滑鼠是否撞到螢幕邊緣
+        global_pos = event.globalPosition().toPoint()
+        from PySide6.QtGui import QGuiApplication
+        screen = QGuiApplication.screenAt(global_pos)
+        if screen:
+            geo = screen.availableGeometry()
+            # 判斷是否撞到四周邊界 (容許 3px 誤差)
+            margin = 3
+            is_at_edge = (
+                global_pos.x() <= geo.left() + margin or
+                global_pos.x() >= geo.right() - margin or
+                global_pos.y() <= geo.top() + margin or
+                global_pos.y() >= geo.bottom() - margin
+            )
+            
+            if is_at_edge:
+                if not self._snap_timer.isActive():
+                    self._snap_timer.start(500) # 0.5秒觸發
+            else:
+                self._snap_timer.stop()
+        else:
+            self._snap_timer.stop()
+
+        self.move(global_pos - self._drag_pos)
         self.request_refresh(0)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        self._snap_timer.stop()
         if self._is_dragging:
-            # 模擬 Windows Snap: 如果釋放時滑鼠靠近螢幕頂端，則觸發最大化
-            if event.globalPosition().y() < 10:
-                if not self.isMaximized():
-                    self.toggle_maximize()
+            # 移除舊的即時 Top Snap，改用 MoveEvent 中的 Timer 觸發
+            pass
         self._is_dragging = False
         super().mouseReleaseEvent(event)
         self._is_resizing = False
