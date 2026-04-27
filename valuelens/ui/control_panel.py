@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QMouseEvent, QPainter, QPaintEvent
+from PySide6.QtGui import QAction, QColor, QMouseEvent, QPainter, QPaintEvent, QPainterPath
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -31,7 +31,7 @@ _RATIO_3PLUS = (70.0, 20.0, 10.0) # n>=3 時使用 7:2:1
 _PANEL_STYLE = """
 QWidget#gl_panel { background: #1e1e22; color: #e0e0e0; border-top: 4px solid #3d89ff; }
 QWidget#gl_top_row_bg { background: #252529; border-bottom: 1px solid #333; }
-QLabel { color: #ccc; background: transparent; font-size: 9pt; }
+QLabel { color: #ccc; background: transparent; font-size: 10pt; }
 QToolButton { 
     color: #eee; 
     background: #333; 
@@ -88,18 +88,31 @@ QPushButton[best="true"]:checked { color: white; border: 1px solid #fff; }
 
 QSlider::groove:horizontal {
     border: 1px solid #444;
-    height: 4px;
-    background: #444;
+    height: 6px;
+    background: #222;
     margin: 2px 0;
-    border-radius: 2px;
+    border-radius: 3px;
 }
+QSlider::sub-page:horizontal {
+    background: #2e7bf6;
+    border: 1px solid #444;
+    height: 6px;
+    margin: 2px 0;
+    border-radius: 3px;
+}
+QSlider#blur_slider::sub-page:horizontal { background: #4CAF50; }
+QSlider#dither_slider::sub-page:horizontal { background: #2196F3; }
+QSlider#edge_slider::sub-page:horizontal { background: #FF9800; }
+QSlider#edge_mix_slider::sub-page:horizontal { background: #FF9800; }
+QSlider#morph_slider::sub-page:horizontal { background: #E91E63; }
+
 QSlider::handle:horizontal {
     background: #eee;
     border: 1px solid #aaa;
-    width: 14px;
-    height: 14px;
-    margin: -6px 0;
-    border-radius: 7px;
+    width: 18px;
+    height: 18px;
+    margin: -7px 0;
+    border-radius: 9px;
 }
 QSlider::handle:horizontal:hover {
     background: #fff;
@@ -166,7 +179,7 @@ class ControlPanel(QWidget):
         self.exp_slider.setRange(-200, 200)
         self.exp_slider.setValue(int(round(-settings.exp_value * 100)))
         self.exp_slider.setInvertedAppearance(False)
-        self.exp_slider.setFixedWidth(110)
+        self.exp_slider.setMinimumWidth(80)
         self.exp_slider.setToolTip("exp 修正偏移 (左暗右亮)")
 
         self.display_range_slider = DualHandleSlider(
@@ -178,7 +191,7 @@ class ControlPanel(QWidget):
         self.display_exp_slider.setRange(-200, 200)
         self.display_exp_slider.setValue(int(round(-settings.display_exp_value * 100)))
         self.display_exp_slider.setInvertedAppearance(False)
-        self.display_exp_slider.setFixedWidth(110)
+        self.display_exp_slider.setMinimumWidth(80)
         self.display_exp_slider.setToolTip("顯示 exp (僅影響顯示)")
 
         self.more_btn = QToolButton()
@@ -282,31 +295,36 @@ class ControlPanel(QWidget):
 
         # Sliders
         self.blur_slider = QSlider(Qt.Orientation.Horizontal)
+        self.blur_slider.setObjectName("blur_slider")
         self.blur_slider.setRange(0, 50)
         self.blur_slider.setValue(settings.blur_radius)
-        self.blur_slider.setFixedWidth(110)
+        self.blur_slider.setMinimumWidth(80)
 
         self.dither_slider = QSlider(Qt.Orientation.Horizontal)
+        self.dither_slider.setObjectName("dither_slider")
         self.dither_slider.setRange(0, 100)
         self.dither_slider.setValue(settings.dither_strength)
-        self.dither_slider.setFixedWidth(110)
+        self.dither_slider.setMinimumWidth(80)
 
         self.edge_slider = QSlider(Qt.Orientation.Horizontal)
+        self.edge_slider.setObjectName("edge_slider")
         self.edge_slider.setRange(0, 100)
         self.edge_slider.setValue(settings.edge_strength)
-        self.edge_slider.setFixedWidth(80)
-        self.edge_slider.setToolTip("邊緣偵測強度 (Canny Threshold)")
+        self.edge_slider.setMinimumWidth(80)
+        self.edge_slider.setToolTip("連線偵測強度 (Canny Threshold)")
 
         self.edge_mix_slider = QSlider(Qt.Orientation.Horizontal)
+        self.edge_mix_slider.setObjectName("edge_mix_slider")
         self.edge_mix_slider.setRange(0, 100)
         self.edge_mix_slider.setValue(settings.edge_mix)
-        self.edge_mix_slider.setFixedWidth(80)
-        self.edge_mix_slider.setToolTip("邊緣混合比例 (0:原圖, 100:純邊緣)")
+        self.edge_mix_slider.setMinimumWidth(80)
+        self.edge_mix_slider.setToolTip("連線混合比例 (0:原圖, 100:純邊緣)")
 
         self.morph_slider = QSlider(Qt.Orientation.Horizontal)
+        self.morph_slider.setObjectName("morph_slider")
         self.morph_slider.setRange(0, 20)
         self.morph_slider.setValue(settings.morph_strength)
-        self.morph_slider.setFixedWidth(60)
+        self.morph_slider.setMinimumWidth(80)
         self.morph_slider.setToolTip("勾邊粗細 (Morphological Gradient)")
 
         # Order Widget
@@ -359,9 +377,9 @@ class ControlPanel(QWidget):
         row2 = QHBoxLayout()
         row2.setContentsMargins(8, 0, 8, 2)
         row2.setSpacing(8)
-        row2.addWidget(QLabel("Logic Range"))
+        row2.addWidget(QLabel("輸入範圍"))
         row2.addWidget(self.range_slider, 2)
-        self.logic_exp_label = QLabel("Logic")
+        self.logic_exp_label = QLabel("偏差")
         row2.addWidget(self.logic_exp_label)
         row2.addWidget(self.exp_slider)
         row2.addWidget(self.logic_reset_btn)
@@ -377,26 +395,20 @@ class ControlPanel(QWidget):
         params_grid.setContentsMargins(8, 4, 8, 4)
         params_grid.setSpacing(10)
         
-        # 第一排：Smoothing 與 Dithering
-        params_grid.addWidget(QLabel("Smoothing"), 0, 0)
+        # 第一排：Smoothing, Dithering, Outlines
+        params_grid.addWidget(QLabel("平滑"), 0, 0)
         params_grid.addWidget(self.blur_slider, 0, 1)
-        params_grid.addWidget(QLabel("Dithering"), 0, 2)
+        params_grid.addWidget(QLabel("抖動"), 0, 2)
         params_grid.addWidget(self.dither_slider, 0, 3)
+        params_grid.addWidget(QLabel("勾邊"), 0, 4)
+        params_grid.addWidget(self.morph_slider, 0, 5)
         
-        # 第二排：Edges 與 Outlines
-        edge_label_box = QHBoxLayout()
-        edge_label_box.addWidget(QLabel("Edges"))
-        edge_label_box.addWidget(QLabel("強度"), 0, Qt.AlignmentFlag.AlignRight)
-        params_grid.addLayout(edge_label_box, 1, 0)
+        # 第二排：Edges 強度與比例
+        params_grid.addWidget(QLabel("連線強度"), 1, 0)
         params_grid.addWidget(self.edge_slider, 1, 1)
-        
-        mix_label_box = QHBoxLayout()
-        mix_label_box.addWidget(QLabel("比例"))
-        params_grid.addLayout(mix_label_box, 1, 2)
+        params_grid.addWidget(QLabel("連線比例"), 1, 2)
         params_grid.addWidget(self.edge_mix_slider, 1, 3)
         
-        params_grid.addWidget(QLabel("Outlines"), 1, 4)
-        params_grid.addWidget(self.morph_slider, 1, 5)
         params_grid.setColumnStretch(1, 1)
         params_grid.setColumnStretch(3, 1)
         params_grid.setColumnStretch(5, 1)
@@ -404,9 +416,9 @@ class ControlPanel(QWidget):
         bottom_row = QHBoxLayout()
         bottom_row.setContentsMargins(8, 0, 8, 4)
         bottom_row.setSpacing(8)
-        bottom_row.addWidget(QLabel("Display Range"))
+        bottom_row.addWidget(QLabel("輸出範圍"))
         bottom_row.addWidget(self.display_range_slider, 2)
-        self.display_exp_label = QLabel("Display")
+        self.display_exp_label = QLabel("偏差")
         bottom_row.addWidget(self.display_exp_label)
         bottom_row.addWidget(self.display_exp_slider)
         bottom_row.addWidget(self.display_reset_btn)
@@ -479,11 +491,17 @@ class ControlPanel(QWidget):
 
     def _emit_settings(self, *_) -> None:
         val = -self.exp_slider.value() / 100.0
-        self.logic_exp_label.setText(f"Logic (2^{val:+.2f})")
+        self.logic_exp_label.setText(f"偏差 (2^{val:+.2f})")
+        
+        levels = self._current_levels()
+        l_val = self.range_slider.lower_value
+        u_val = self.range_slider.upper_value
+        self.range_slider.set_levels(levels, l_val, u_val, val)
+        
         self.settings_changed.emit(
-            self._current_levels(),
-            self.range_slider.lower_value,
-            self.range_slider.upper_value,
+            levels,
+            l_val,
+            u_val,
             val,
         )
 
@@ -492,10 +510,20 @@ class ControlPanel(QWidget):
 
     def _emit_display_settings(self, *_) -> None:
         val = -self.display_exp_slider.value() / 100.0
-        self.display_exp_label.setText(f"Display (2^{val:+.2f})")
+        self.display_exp_label.setText(f"偏差 (2^{val:+.2f})")
+        
+        # Display slider segment colors
+        # For output range, we just use a simple gradient or standard behavior
+        # But to be consistent, we could also use segments.
+        # However, output mapping is usually just linear (or with its own exp).
+        # We'll use the same levels but with display_exp.
+        l_val = self.display_range_slider.lower_value
+        u_val = self.display_range_slider.upper_value
+        self.display_range_slider.set_levels(self._current_levels(), l_val, u_val, val)
+        
         self.display_settings_changed.emit(
-            self.display_range_slider.lower_value,
-            self.display_range_slider.upper_value,
+            l_val,
+            u_val,
             val,
         )
 
@@ -670,6 +698,11 @@ class DualHandleSlider(QWidget):
         self._active_handle: str | None = None
         self.setMinimumWidth(180)
         self.setFixedHeight(30)
+        self._levels_info: tuple[int, int, int, float] | None = None
+
+    def set_levels(self, levels: int, min_val: int, max_val: int, exp_val: float) -> None:
+        self._levels_info = (levels, min_val, max_val, exp_val)
+        self.update()
 
     def set_values(self, lower: int, upper: int) -> None:
         new_lower = max(self.minimum, min(self.maximum - 1, lower))
@@ -701,13 +734,48 @@ class DualHandleSlider(QWidget):
 
         track = self._track_rect()
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#333"))
-        painter.drawRoundedRect(track, 3, 3)
+        
+        # 如果有階層資訊，繪製分段背景
+        if self._levels_info:
+            levels, min_v, max_v, exp_v = self._levels_info
+            gamma = 2.0 ** exp_v
+            
+            # 建立剪裁區域
+            painter.save()
+            path = QPainterPath()
+            path.addRoundedRect(track, 3, 3)
+            painter.setClipPath(path)
+            
+            for k in range(levels):
+                # 段落起始與結束比例 (0.0 ~ 1.0)
+                # v = min + (max-min) * (norm ^ (1/gamma))
+                # 所以 norm = (k/levels)
+                # 邊界值 v_k = min + (max-min) * ((k/levels) ^ (1/gamma))
+                
+                def get_v(norm_val):
+                    return min_v + (max_v - min_v) * (norm_val ** (1.0 / gamma))
+
+                v_start = 0 if k == 0 else get_v(k / levels)
+                v_end = 255 if k == levels - 1 else get_v((k + 1) / levels)
+                
+                x_start = self._value_to_x(int(round(v_start)))
+                x_end = self._value_to_x(int(round(v_end)))
+                
+                tone = int(round((k / (levels - 1)) * 255))
+                painter.setBrush(QColor(tone, tone, tone))
+                painter.drawRect(x_start, track.top(), x_end - x_start, track.height())
+            
+            painter.restore()
+        else:
+            painter.setBrush(QColor("#333"))
+            painter.drawRoundedRect(track, 3, 3)
 
         x1 = self._value_to_x(self.lower_value)
         x2 = self._value_to_x(self.upper_value)
+        
+        # 繪製選取範圍的半透明藍色覆蓋 (避免完全遮擋階層顏色)
         active = QRect(min(x1, x2), track.top(), abs(x2 - x1), track.height())
-        painter.setBrush(QColor("#2e7bf6"))
+        painter.setBrush(QColor(46, 123, 246, 80)) # 增加透明度
         painter.drawRoundedRect(active, 3, 3)
 
         painter.setPen(QColor("#888"))
@@ -765,10 +833,10 @@ class DraggableOrderWidget(QWidget):
         self._order = list(order)
         self._states = dict(states)
         self._item_map = {
-            "blur": "Smoothing",
-            "dither": "Dithering",
-            "edge": "Edges",
-            "morph": "Outlines"
+            "blur": "平滑",
+            "dither": "抖動",
+            "edge": "連線",
+            "morph": "勾邊"
         }
         self._colors = {
             "blur": "#4CAF50",
