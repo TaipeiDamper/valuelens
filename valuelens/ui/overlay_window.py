@@ -514,7 +514,7 @@ class OverlayWindow(QMainWindow):
         self.request_refresh(16)
 
     def on_collapse_toggled(self, collapsed: bool) -> None:
-        self._panel_height = 36 if collapsed else 136
+        self._panel_height = 36 if collapsed else 200
         self._layout_panel()
         
         # 面板收合會導致鏡片區域 (lens rect) 大小與物理座標改變

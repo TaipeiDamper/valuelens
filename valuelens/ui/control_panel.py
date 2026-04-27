@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QPushButton,
     QButtonGroup,
+    QGridLayout,
+    QSizePolicy,
 )
 
 from valuelens.config.settings import AppSettings
@@ -360,36 +362,40 @@ class ControlPanel(QWidget):
         row2.addWidget(self.exp_slider)
         row2.addWidget(self.logic_reset_btn)
 
-        # 標籤排序行 (獨立一行)
+        # 標籤排序行 (改為自適應寬度)
         order_row = QHBoxLayout()
         order_row.setContentsMargins(8, 2, 8, 2)
         order_row.addWidget(self.order_widget)
-        order_row.addStretch(1)
+        # 不再 addStretch，讓 widget 填滿
 
-        # 參數調整行 (原本的 row3)
-        row3 = QHBoxLayout()
-        row3.setContentsMargins(8, 0, 8, 2)
-        row3.setSpacing(10)
+        # 參數調整區域 (改用 GridLayout 以防炸掉)
+        params_grid = QGridLayout()
+        params_grid.setContentsMargins(8, 4, 8, 4)
+        params_grid.setSpacing(10)
         
-        # Smoothing & Dithering
-        row3.addWidget(QLabel("Smoothing"))
-        row3.addWidget(self.blur_slider)
-        row3.addSpacing(10)
-        row3.addWidget(QLabel("Dithering"))
-        row3.addWidget(self.dither_slider)
+        # 第一排：Smoothing 與 Dithering
+        params_grid.addWidget(QLabel("Smoothing"), 0, 0)
+        params_grid.addWidget(self.blur_slider, 0, 1)
+        params_grid.addWidget(QLabel("Dithering"), 0, 2)
+        params_grid.addWidget(self.dither_slider, 0, 3)
         
-        # Edges
-        row3.addSpacing(10)
-        row3.addWidget(QLabel("Edges 強度"))
-        row3.addWidget(self.edge_slider)
-        row3.addWidget(QLabel("比例"))
-        row3.addWidget(self.edge_mix_slider)
+        # 第二排：Edges 與 Outlines
+        edge_label_box = QHBoxLayout()
+        edge_label_box.addWidget(QLabel("Edges"))
+        edge_label_box.addWidget(QLabel("強度"), 0, Qt.AlignmentFlag.AlignRight)
+        params_grid.addLayout(edge_label_box, 1, 0)
+        params_grid.addWidget(self.edge_slider, 1, 1)
         
-        # Outlines
-        row3.addSpacing(10)
-        row3.addWidget(QLabel("Outlines"))
-        row3.addWidget(self.morph_slider)
-        row3.addStretch(1)
+        mix_label_box = QHBoxLayout()
+        mix_label_box.addWidget(QLabel("比例"))
+        params_grid.addLayout(mix_label_box, 1, 2)
+        params_grid.addWidget(self.edge_mix_slider, 1, 3)
+        
+        params_grid.addWidget(QLabel("Outlines"), 1, 4)
+        params_grid.addWidget(self.morph_slider, 1, 5)
+        params_grid.setColumnStretch(1, 1)
+        params_grid.setColumnStretch(3, 1)
+        params_grid.setColumnStretch(5, 1)
 
         bottom_row = QHBoxLayout()
         bottom_row.setContentsMargins(8, 0, 8, 4)
@@ -407,11 +413,12 @@ class ControlPanel(QWidget):
         extra_layout.setSpacing(0)
         extra_layout.addLayout(row2)
         extra_layout.addLayout(order_row)
-        extra_layout.addLayout(row3)
+        extra_layout.addLayout(params_grid)
         extra_layout.addLayout(bottom_row)
 
         layout = QVBoxLayout(self)
-        self.setFixedHeight(170) # 稍微增加高度以容納新行
+        self.setFixedHeight(200) # 兩行參數後增加高度
+        self.setMinimumWidth(500) # 防止視窗縮太小導致 UI 完全崩潰
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.top_row_widget)
@@ -450,7 +457,7 @@ class ControlPanel(QWidget):
             self.collapse_btn.setText("▼")
         else:
             self.extra_container.show()
-            self.setFixedHeight(170)
+            self.setFixedHeight(200)
             self.collapse_btn.setText("▲")
         self.collapse_toggled.emit(checked)
 
@@ -773,7 +780,8 @@ class DraggableOrderWidget(QWidget):
         self._active_idx = -1
         self._drag_x = 0
         self._has_dragged = False
-        self.setFixedSize(280, 26)
+        self.setMinimumHeight(26)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def set_order(self, order: list[str], states: dict[str, bool]) -> None:
