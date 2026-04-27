@@ -39,7 +39,8 @@ class ImageModeDialog(QDialog):
         self, levels: int, min_value: int, max_value: int, exp_value: float,
         blur_enabled: bool = False, blur_radius: int = 0,
         dither_enabled: bool = False, dither_strength: int = 0,
-        dither_first: bool = False,
+        process_order: list[str] = ("blur", "dither", "edge", "morph"),
+        morph_enabled: bool = False, morph_strength: int = 1,
         parent=None
     ) -> None:
         super().__init__(parent)
@@ -54,7 +55,9 @@ class ImageModeDialog(QDialog):
         self.blur_radius = blur_radius
         self.dither_enabled = dither_enabled
         self.dither_strength = dither_strength
-        self.dither_first = dither_first
+        self.process_order = list(process_order)
+        self.morph_enabled = morph_enabled
+        self.morph_strength = morph_strength
 
         self._source: Optional[np.ndarray] = None
         self._result: Optional[np.ndarray] = None
@@ -100,7 +103,8 @@ class ImageModeDialog(QDialog):
         self, levels: int, min_value: int, max_value: int, exp_value: float,
         blur_enabled: bool = False, blur_radius: int = 0,
         dither_enabled: bool = False, dither_strength: int = 0,
-        dither_first: bool = False,
+        process_order: list[str] = ("blur", "dither", "edge", "morph"),
+        morph_enabled: bool = False, morph_strength: int = 1,
     ) -> None:
         self.levels = levels
         self.min_value = min_value
@@ -110,7 +114,9 @@ class ImageModeDialog(QDialog):
         self.blur_radius = blur_radius
         self.dither_enabled = dither_enabled
         self.dither_strength = dither_strength
-        self.dither_first = dither_first
+        self.process_order = list(process_order)
+        self.morph_enabled = morph_enabled
+        self.morph_strength = morph_strength
 
     def open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -168,7 +174,9 @@ class ImageModeDialog(QDialog):
             self._source, self.levels, self.min_value, self.max_value, self.exp_value,
             blur_radius=eff_blur,
             dither_strength=eff_dither,
-            dither_first=getattr(self, 'dither_first', False)
+            process_order=self.process_order,
+            morph_enabled=self.morph_enabled,
+            morph_strength=self.morph_strength
         )
         self.preview.setPixmap(_bgr_to_qpixmap(self._result).scaled(
             self.preview.size(),

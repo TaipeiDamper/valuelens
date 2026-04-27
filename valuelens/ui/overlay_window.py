@@ -62,7 +62,9 @@ class OverlayWindow(QMainWindow):
             blur_radius=settings.blur_radius,
             dither_enabled=settings.dither_enabled,
             dither_strength=settings.dither_strength,
-            dither_first=getattr(settings, 'dither_first', False),
+            process_order=settings.process_order,
+            morph_enabled=settings.morph_enabled,
+            morph_strength=settings.morph_strength,
             parent=self,
         )
         self.image_mode.set_import_callback(self._get_current_raw_frame)
@@ -137,6 +139,9 @@ class OverlayWindow(QMainWindow):
         self.panel.settings_changed.connect(self.on_settings_changed)
         self.panel.display_settings_changed.connect(self.on_display_settings_changed)
         self.panel.effect_settings_changed.connect(self.on_effect_settings_changed)
+        self.panel.edge_settings_changed.connect(self.on_edge_settings_changed)
+        self.panel.morph_settings_changed.connect(self.on_morph_settings_changed)
+        self.panel.order_changed.connect(self.on_order_changed)
         self.panel.collapse_toggled.connect(self.on_collapse_toggled)
         self.panel.compare_mode_changed.connect(self.on_compare_mode_changed)
         self.panel.hotkey_changed.connect(self.on_hotkey_changed)
@@ -148,7 +153,6 @@ class OverlayWindow(QMainWindow):
         self.panel.screenshot_requested.connect(self.on_screenshot_requested)
         self.panel.image_mode_requested.connect(self.open_image_mode)
         self.panel.distribution_toggled.connect(self.on_distribution_toggled)
-        self.panel.bypass_toggled.connect(self.on_bypass_toggled)
         self.panel.quit_requested.connect(self.force_quit)
         self.panel.minimize_requested.connect(self.showMinimized)
         self.panel.maximize_requested.connect(self.toggle_maximize)
@@ -458,7 +462,8 @@ class OverlayWindow(QMainWindow):
             levels, min_value, max_value, exp_value,
             self.settings.blur_enabled, self.settings.blur_radius,
             self.settings.dither_enabled, self.settings.dither_strength,
-            getattr(self.settings, 'dither_first', False)
+            self.settings.process_order,
+            self.settings.morph_enabled, self.settings.morph_strength
         )
         self._processed_distribution_pct = [0.0] * max(2, int(levels))
         self._raw_distribution_pct = [0.0] * max(2, int(levels))
@@ -474,19 +479,36 @@ class OverlayWindow(QMainWindow):
 
     def on_effect_settings_changed(
         self, blur_enabled: bool, blur_radius: int,
-        dither_enabled: bool, dither_strength: int,
-        dither_first: bool
+        dither_enabled: bool, dither_strength: int
     ) -> None:
         self.settings.blur_enabled = blur_enabled
         self.settings.blur_radius = blur_radius
         self.settings.dither_enabled = dither_enabled
         self.settings.dither_strength = dither_strength
-        self.settings.dither_first = dither_first
         # Update image mode if active
         self.image_mode.set_quantize_settings(
             self.settings.levels, self.settings.min_value, self.settings.max_value, self.settings.exp_value,
             blur_enabled, blur_radius,
-            dither_enabled, dither_strength, dither_first
+            dither_enabled, dither_strength, self.settings.process_order,
+            self.settings.morph_enabled, self.settings.morph_strength
+        )
+        self._last_frame_signature = None
+        self.request_refresh(16)
+
+    def on_order_changed(self, order: list[str]) -> None:
+        self.settings.process_order = order
+        self.image_mode.process_order = order
+        self._last_frame_signature = None
+        self.request_refresh(16)
+
+    def on_morph_settings_changed(self, enabled: bool, strength: int) -> None:
+        self.settings.morph_enabled = enabled
+        self.settings.morph_strength = strength
+        self.image_mode.set_quantize_settings(
+            self.settings.levels, self.settings.min_value, self.settings.max_value, self.settings.exp_value,
+            self.settings.blur_enabled, self.settings.blur_radius,
+            self.settings.dither_enabled, self.settings.dither_strength, self.settings.process_order,
+            enabled, strength
         )
         self._last_frame_signature = None
         self.request_refresh(16)
@@ -538,7 +560,8 @@ class OverlayWindow(QMainWindow):
             self.settings.levels, lower, upper, exp_value,
             self.settings.blur_enabled, self.settings.blur_radius,
             self.settings.dither_enabled, self.settings.dither_strength,
-            getattr(self.settings, 'dither_first', False)
+            self.settings.process_order,
+            self.settings.morph_enabled, self.settings.morph_strength
         )
 
     def on_auto_balance_target_requested(self, ratios: tuple[float, float, float]) -> None:
@@ -834,8 +857,10 @@ class OverlayWindow(QMainWindow):
                     display_exp=self.settings.display_exp_value,
                     blur_radius=eff_blur,
                     dither_strength=eff_dither,
-                    dither_first=getattr(self.settings, 'dither_first', False),
                     edge_strength=eff_edge,
+                    process_order=self.settings.process_order,
+                    morph_enabled=self.settings.morph_enabled,
+                    morph_strength=self.settings.morph_strength,
                 )
                 
                 h, w = logic_quantized.shape[:2]

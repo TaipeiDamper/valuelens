@@ -117,14 +117,16 @@ class ControlPanel(QWidget):
     import_requested = Signal()
     screenshot_requested = Signal()
     distribution_toggled = Signal(bool)
-    bypass_toggled = Signal(bool)
+    effect_settings_changed = Signal(bool, int, bool, int)
+    edge_settings_changed = Signal(bool, int, int)
+    morph_settings_changed = Signal(bool, int)
+    order_changed = Signal(list)
     quit_requested = Signal()
     minimize_requested = Signal()
     drag_started = Signal(object)
     auto_balance_raw_requested = Signal()
     auto_balance_target_requested = Signal(tuple)
     auto_continuous_toggled = Signal(bool)
-    edge_settings_changed = Signal(bool, int, int)
     debug_screenshot_requested = Signal()
     save_startup_requested = Signal()
     clear_startup_requested = Signal()
@@ -246,13 +248,6 @@ class ControlPanel(QWidget):
         self.distribution_btn.setCheckable(True)
         self.distribution_btn.setChecked(True)
         self.distribution_btn.toggled.connect(self.distribution_toggled.emit)
-
-        self.bypass_btn = QToolButton()
-        self.bypass_btn.setText("▶️")
-        self.bypass_btn.setToolTip("Bypass: 跳過所有處理，顯示原始影像")
-        self.bypass_btn.setCheckable(True)
-        self.bypass_btn.setChecked(False)
-        self.bypass_btn.toggled.connect(self._on_bypass_toggled)
         
         self.record_btn = QToolButton()
         self.record_btn.setText("🎥")
@@ -280,25 +275,17 @@ class ControlPanel(QWidget):
         self.display_reset_btn.setText("Reset")
         self.display_reset_btn.setToolTip("重置第二階段 (Display) 參數")
 
-        # Bilateral
-        self.blur_check = QCheckBox("平滑 Bilateral")
-        self.blur_check.setChecked(settings.blur_enabled)
+        # Sliders
         self.blur_slider = QSlider(Qt.Orientation.Horizontal)
         self.blur_slider.setRange(0, 50)
         self.blur_slider.setValue(settings.blur_radius)
         self.blur_slider.setFixedWidth(110)
 
-        # Dither
-        self.dither_check = QCheckBox("遞色 Ordered")
-        self.dither_check.setChecked(settings.dither_enabled)
         self.dither_slider = QSlider(Qt.Orientation.Horizontal)
         self.dither_slider.setRange(0, 100)
         self.dither_slider.setValue(settings.dither_strength)
         self.dither_slider.setFixedWidth(110)
 
-        # Edges
-        self.edge_check = QCheckBox("顯示邊緣")
-        self.edge_check.setChecked(settings.edge_enabled)
         self.edge_slider = QSlider(Qt.Orientation.Horizontal)
         self.edge_slider.setRange(0, 100)
         self.edge_slider.setValue(settings.edge_strength)
@@ -311,12 +298,22 @@ class ControlPanel(QWidget):
         self.edge_mix_slider.setFixedWidth(80)
         self.edge_mix_slider.setToolTip("邊緣混合比例 (0:原圖, 100:純邊緣)")
 
-        self.order_btn = QToolButton()
-        self.order_btn.setCheckable(True)
-        self.order_btn.setChecked(getattr(settings, 'dither_first', False))
-        self.order_btn.setText("先 Bilateral 後 Ordered" if not getattr(settings, 'dither_first', False) else "先 Ordered 後 Bilateral")
-        self.order_btn.setToolTip("點擊切換平滑與遞色兩階段的處理順序")
-        self.order_btn.toggled.connect(self._on_order_toggled)
+        self.morph_slider = QSlider(Qt.Orientation.Horizontal)
+        self.morph_slider.setRange(0, 20)
+        self.morph_slider.setValue(settings.morph_strength)
+        self.morph_slider.setFixedWidth(60)
+        self.morph_slider.setToolTip("勾邊粗細 (Morphological Gradient)")
+
+        # Order Widget
+        states = {
+            "blur": settings.blur_enabled,
+            "dither": settings.dither_enabled,
+            "edge": settings.edge_enabled,
+            "morph": settings.morph_enabled
+        }
+        self.order_widget = DraggableOrderWidget(settings.process_order, states)
+        self.order_widget.order_changed.connect(self.order_changed.emit)
+        self.order_widget.toggle_requested.connect(self._on_module_toggle)
 
         self.collapse_btn = QToolButton()
         self.collapse_btn.setText("▲")
@@ -340,7 +337,6 @@ class ControlPanel(QWidget):
         top_layout.addWidget(self.screenshot_btn)
         top_layout.addWidget(self.image_mode_btn)
         top_layout.addWidget(self.distribution_btn)
-        top_layout.addWidget(self.bypass_btn)
         top_layout.addWidget(self.record_btn)
         top_layout.addStretch(1)
         top_layout.addWidget(self.collapse_btn)
@@ -364,19 +360,35 @@ class ControlPanel(QWidget):
         row2.addWidget(self.exp_slider)
         row2.addWidget(self.logic_reset_btn)
 
+        # 標籤排序行 (獨立一行)
+        order_row = QHBoxLayout()
+        order_row.setContentsMargins(8, 2, 8, 2)
+        order_row.addWidget(self.order_widget)
+        order_row.addStretch(1)
+
+        # 參數調整行 (原本的 row3)
         row3 = QHBoxLayout()
         row3.setContentsMargins(8, 0, 8, 2)
-        row3.setSpacing(8)
-        row3.addWidget(self.blur_check)
-        row3.addWidget(self.blur_slider, 2)
-        row3.addWidget(self.order_btn)
-        row3.addWidget(self.dither_check)
-        row3.addWidget(self.dither_slider, 2)
-        row3.addWidget(self.edge_check)
-        row3.addWidget(QLabel("強度"))
+        row3.setSpacing(10)
+        
+        # Smoothing & Dithering
+        row3.addWidget(QLabel("Smoothing"))
+        row3.addWidget(self.blur_slider)
+        row3.addSpacing(10)
+        row3.addWidget(QLabel("Dithering"))
+        row3.addWidget(self.dither_slider)
+        
+        # Edges
+        row3.addSpacing(10)
+        row3.addWidget(QLabel("Edges 強度"))
         row3.addWidget(self.edge_slider)
         row3.addWidget(QLabel("比例"))
         row3.addWidget(self.edge_mix_slider)
+        
+        # Outlines
+        row3.addSpacing(10)
+        row3.addWidget(QLabel("Outlines"))
+        row3.addWidget(self.morph_slider)
         row3.addStretch(1)
 
         bottom_row = QHBoxLayout()
@@ -394,10 +406,12 @@ class ControlPanel(QWidget):
         extra_layout.setContentsMargins(0, 0, 0, 0)
         extra_layout.setSpacing(0)
         extra_layout.addLayout(row2)
+        extra_layout.addLayout(order_row)
         extra_layout.addLayout(row3)
         extra_layout.addLayout(bottom_row)
 
         layout = QVBoxLayout(self)
+        self.setFixedHeight(170) # 稍微增加高度以容納新行
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.top_row_widget)
@@ -409,13 +423,11 @@ class ControlPanel(QWidget):
         self.exp_slider.valueChanged.connect(self._emit_settings)
         self.display_range_slider.range_changed.connect(self._on_display_range_change)
         self.display_exp_slider.valueChanged.connect(self._emit_display_settings)
-        self.blur_check.toggled.connect(self._emit_effect_settings)
         self.blur_slider.valueChanged.connect(self._emit_effect_settings)
-        self.dither_check.toggled.connect(self._emit_effect_settings)
         self.dither_slider.valueChanged.connect(self._emit_effect_settings)
-        self.edge_check.toggled.connect(self._emit_edge_settings)
         self.edge_slider.valueChanged.connect(self._emit_edge_settings)
         self.edge_mix_slider.valueChanged.connect(self._emit_edge_settings)
+        self.morph_slider.valueChanged.connect(self._emit_morph_settings)
         self.image_mode_action.triggered.connect(self.image_mode_requested.emit)
         self.hotkey_action.triggered.connect(self._prompt_hotkey)
         self.debug_screenshot_action.triggered.connect(self.debug_screenshot_requested.emit)
@@ -438,7 +450,7 @@ class ControlPanel(QWidget):
             self.collapse_btn.setText("▼")
         else:
             self.extra_container.show()
-            self.setFixedHeight(136)
+            self.setFixedHeight(170)
             self.collapse_btn.setText("▲")
         self.collapse_toggled.emit(checked)
 
@@ -476,32 +488,34 @@ class ControlPanel(QWidget):
             val,
         )
 
-    def _on_order_toggled(self, checked: bool) -> None:
-        self.order_btn.setText("先 Ordered 後 Bilateral" if checked else "先 Bilateral 後 Ordered")
-        self._emit_effect_settings()
-
-    def _on_bypass_toggled(self, checked: bool) -> None:
-        self.bypass_btn.setText("⏸️" if checked else "▶️")
-        self.bypass_btn.setToolTip(
-            "Bypass ON: 顯示原始影像 (點擊恢復處理)" if checked 
-            else "Bypass: 跳過所有處理，顯示原始影像"
-        )
-        self.bypass_toggled.emit(checked)
+    def _on_module_toggle(self, key: str, state: bool) -> None:
+        """當 DraggableOrderWidget 的標籤被點擊時，切換對應功能的開關。"""
+        if key == "blur" or key == "dither":
+            self._emit_effect_settings()
+        elif key == "edge":
+            self._emit_edge_settings()
+        elif key == "morph":
+            self._emit_morph_settings()
 
     def _emit_effect_settings(self, *_) -> None:
         self.effect_settings_changed.emit(
-            self.blur_check.isChecked(),
+            self.order_widget._states.get("blur", True),
             self.blur_slider.value(),
-            self.dither_check.isChecked(),
+            self.order_widget._states.get("dither", True),
             self.dither_slider.value(),
-            self.order_btn.isChecked(),
         )
 
     def _emit_edge_settings(self, *_) -> None:
         self.edge_settings_changed.emit(
-            self.edge_check.isChecked(),
+            self.order_widget._states.get("edge", True),
             self.edge_slider.value(),
             self.edge_mix_slider.value(),
+        )
+
+    def _emit_morph_settings(self, *_) -> None:
+        self.morph_settings_changed.emit(
+            self.order_widget._states.get("morph", True),
+            self.morph_slider.value(),
         )
 
     def _prompt_hotkey(self) -> None:
@@ -609,14 +623,18 @@ class ControlPanel(QWidget):
         self.display_range_slider.set_values(settings.display_min_value, settings.display_max_value)
         self.display_exp_slider.setValue(int(round(-settings.display_exp_value * 100)))
         self.enabled_check.setChecked(settings.compare_mode)
-        self.blur_check.setChecked(settings.blur_enabled)
         self.blur_slider.setValue(settings.blur_radius)
-        self.dither_check.setChecked(settings.dither_enabled)
         self.dither_slider.setValue(settings.dither_strength)
-        self.order_btn.setChecked(getattr(settings, 'dither_first', False))
-        self.edge_check.setChecked(settings.edge_enabled)
+        states = {
+            "blur": settings.blur_enabled,
+            "dither": settings.dither_enabled,
+            "edge": settings.edge_enabled,
+            "morph": settings.morph_enabled
+        }
+        self.order_widget.set_order(settings.process_order, states)
         self.edge_slider.setValue(settings.edge_strength)
         self.edge_mix_slider.setValue(settings.edge_mix)
+        self.morph_slider.setValue(settings.morph_strength)
         self._current_hotkey = settings.hotkey
         self.hotkey_action.setText(f"設定快捷鍵 ({settings.hotkey})")
         # Update labels
@@ -730,3 +748,105 @@ class DualHandleSlider(QWidget):
             self.set_values(value, self.upper_value)
         elif self._active_handle == "upper":
             self.set_values(self.lower_value, value)
+
+
+class DraggableOrderWidget(QWidget):
+    order_changed = Signal(list)
+    toggle_requested = Signal(str, bool)
+
+    def __init__(self, order: list[str], states: dict[str, bool], parent=None) -> None:
+        super().__init__(parent)
+        self._order = list(order)
+        self._states = dict(states)
+        self._item_map = {
+            "blur": "Smoothing",
+            "dither": "Dithering",
+            "edge": "Edges",
+            "morph": "Outlines"
+        }
+        self._colors = {
+            "blur": "#4CAF50",
+            "dither": "#2196F3",
+            "edge": "#FF9800",
+            "morph": "#E91E63"
+        }
+        self._active_idx = -1
+        self._drag_x = 0
+        self._has_dragged = False
+        self.setFixedSize(280, 26)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_order(self, order: list[str], states: dict[str, bool]) -> None:
+        self._order = list(order)
+        self._states = dict(states)
+        self.update()
+
+    def _item_rects(self) -> list[QRect]:
+        w = self.width() // len(self._order)
+        return [QRect(i * w, 0, w - 4, self.height()) for i in range(len(self._order))]
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        rects = self._item_rects()
+        for i, key in enumerate(self._order):
+            if i == self._active_idx: continue
+            self._draw_item(painter, rects[i], key)
+            
+        if self._active_idx != -1:
+            w = self.width() // len(self._order)
+            drag_rect = QRect(self._drag_x - w//2, 0, w - 4, self.height())
+            self._draw_item(painter, drag_rect, self._order[self._active_idx], alpha=180)
+
+    def _draw_item(self, painter, rect, key, alpha=255):
+        is_on = self._states.get(key, True)
+        if is_on:
+            color = QColor(self._colors[key])
+        else:
+            color = QColor("#444")
+            
+        color.setAlpha(alpha)
+        painter.setBrush(color)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(rect, 4, 4)
+        
+        painter.setPen(QColor("white") if is_on else QColor("#888"))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._item_map[key])
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        pos = event.position().toPoint()
+        rects = self._item_rects()
+        for i, r in enumerate(rects):
+            if r.contains(pos):
+                self._active_idx = i
+                self._drag_x = pos.x()
+                self._has_dragged = False
+                self.update()
+                break
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._active_idx == -1: return
+        self._drag_x = event.position().toPoint().x()
+        self._has_dragged = True
+        
+        # Check for swap
+        w = self.width() // len(self._order)
+        new_idx = max(0, min(len(self._order)-1, self._drag_x // w))
+        if new_idx != self._active_idx:
+            item = self._order.pop(self._active_idx)
+            self._order.insert(new_idx, item)
+            self._active_idx = new_idx
+            self.order_changed.emit(self._order)
+            
+        self.update()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._active_idx != -1 and not self._has_dragged:
+            key = self._order[self._active_idx]
+            new_state = not self._states.get(key, True)
+            self._states[key] = new_state
+            self.toggle_requested.emit(key, new_state)
+            
+        self._active_idx = -1
+        self.update()
