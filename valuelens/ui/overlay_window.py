@@ -89,7 +89,7 @@ class OverlayWindow(QMainWindow):
         self._resize_start_global: QPoint | None = None
         self._frame = QPixmap()
         self._raw_frame = QPixmap()
-        self._panel_height = 170
+        self._panel_height = 200
         self._compare_gap = 6
         self._last_toggle_ts = 0.0
         self._is_dragging = False
@@ -720,7 +720,9 @@ class OverlayWindow(QMainWindow):
         
         self._fps_count += 1
         now = time.time()
-        if now - self._fps_last_report >= 5.0:
+        if now - self._fps_last_report >= 1.0:
+            fps = self._fps_count / (now - self._fps_last_report)
+            self.panel.set_fps(fps)
             self._fps_count = 0
             self._fps_last_report = now
 

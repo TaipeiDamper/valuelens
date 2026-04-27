@@ -265,6 +265,9 @@ class ControlPanel(QWidget):
         self.auto_continuous_check.setToolTip("開啟後會不斷自動調整參數，鎖定目前選擇的比例")
         self.auto_continuous_check.setChecked(False)
 
+        self.fps_label = QLabel("FPS: --")
+        self.fps_label.setStyleSheet("color: #888; font-family: monospace; font-weight: bold; margin-right: 10px;")
+
         self.balance_presets = QComboBox()
         self._update_balance_presets(settings.levels)
         self.balance_presets.setFixedWidth(100)
@@ -341,6 +344,7 @@ class ControlPanel(QWidget):
         top_layout.addWidget(self.distribution_btn)
         top_layout.addWidget(self.record_btn)
         top_layout.addStretch(1)
+        top_layout.addWidget(self.fps_label)
         top_layout.addWidget(self.collapse_btn)
         top_layout.addWidget(self.more_btn)
         top_layout.addSpacing(10)
@@ -494,6 +498,9 @@ class ControlPanel(QWidget):
             self.display_range_slider.upper_value,
             val,
         )
+
+    def set_fps(self, fps: float) -> None:
+        self.fps_label.setText(f"FPS: {fps:.1f}")
 
     def _on_module_toggle(self, key: str, state: bool) -> None:
         """當 DraggableOrderWidget 的標籤被點擊時，切換對應功能的開關。"""
