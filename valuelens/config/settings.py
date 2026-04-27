@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 
@@ -35,6 +35,7 @@ class AppSettings:
     width: int = 640
     height: int = 360
     startup_preset: dict | None = None
+    presets: list[dict | None] = field(default_factory=lambda: [None] * 20)
     process_order: list[str] = ("blur", "dither", "edge", "morph")
 
 

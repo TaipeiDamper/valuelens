@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QGridLayout,
     QSizePolicy,
+    QFrame,
 )
 
 from valuelens.config.settings import AppSettings
@@ -143,10 +144,13 @@ class ControlPanel(QWidget):
     auto_balance_target_requested = Signal(tuple)
     auto_continuous_toggled = Signal(bool)
     debug_screenshot_requested = Signal()
-    save_startup_requested = Signal()
-    clear_startup_requested = Signal()
     maximize_requested = Signal()
     recording_window_toggled = Signal(bool)
+    save_preset_requested = Signal(int)
+    load_preset_requested = Signal(int)
+    clear_preset_requested = Signal(int)
+    save_startup_requested = Signal()
+    clear_startup_requested = Signal()
 
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
@@ -165,34 +169,31 @@ class ControlPanel(QWidget):
         else:
             self.levels.addItem(str(settings.levels), settings.levels)
             self.levels.setCurrentIndex(self.levels.count() - 1)
-        self.levels.setFixedWidth(68)
-        self.levels.setToolTip("階層數量")
+        self.levels.setFixedWidth(50)
+        self.levels.setToolTip("階層數量 (Quantization Levels)")
 
-        self.enabled_check = QCheckBox("開啟對照")
+        self.enabled_check = QCheckBox()
         self.enabled_check.setChecked(settings.compare_mode)
-        self.enabled_check.setToolTip("顯示或隱藏原始參考圖")
+        self.enabled_check.setToolTip("開啟對照 (Toggle Reference View)")
 
         self.range_slider = DualHandleSlider(0, 255, settings.min_value, settings.max_value)
         self.range_slider.setToolTip("亮度上下限 (輸入範圍)")
 
         self.exp_slider = QSlider(Qt.Orientation.Horizontal)
-        self.exp_slider.setRange(-200, 200)
-        self.exp_slider.setValue(int(round(-settings.exp_value * 100)))
-        self.exp_slider.setInvertedAppearance(False)
-        self.exp_slider.setMinimumWidth(80)
-        self.exp_slider.setToolTip("exp 修正偏移 (左暗右亮)")
+        self.exp_slider.setMinimumWidth(60)
+        self.exp_slider.setToolTip("偏差修正 (Bias/Gamma) - 左暗右亮")
 
         self.display_range_slider = DualHandleSlider(
             0, 255, settings.display_min_value, settings.display_max_value
         )
-        self.display_range_slider.setToolTip("顯示亮度上下限 (影像輸出呈現)")
+        self.display_range_slider.setToolTip("影像輸出範圍 (Output Range Mapping)")
 
         self.display_exp_slider = QSlider(Qt.Orientation.Horizontal)
         self.display_exp_slider.setRange(-200, 200)
         self.display_exp_slider.setValue(int(round(-settings.display_exp_value * 100)))
         self.display_exp_slider.setInvertedAppearance(False)
-        self.display_exp_slider.setMinimumWidth(80)
-        self.display_exp_slider.setToolTip("顯示 exp (僅影響顯示)")
+        self.display_exp_slider.setMinimumWidth(60)
+        self.display_exp_slider.setToolTip("輸出偏差 (Output Bias)")
 
         self.more_btn = QToolButton()
         self.more_btn.setText("更多")
@@ -203,10 +204,7 @@ class ControlPanel(QWidget):
         
         # 預設集子選單
         self.preset_menu = QMenu("預設集 (Presets)", self)
-        self.save_startup_action = QAction("儲存目前設定為「啟動預設」", self)
-        self.clear_startup_action = QAction("清除並恢復「上次關閉狀態」", self)
-        self.preset_menu.addAction(self.save_startup_action)
-        self.preset_menu.addAction(self.clear_startup_action)
+        self.update_presets_ui(settings.presets)
         
         self.image_mode_action = QAction("圖片模式", self)
         self.hotkey_action = QAction(f"設定快捷鍵 ({settings.hotkey})", self)
@@ -271,10 +269,10 @@ class ControlPanel(QWidget):
         self.record_btn.toggled.connect(self.recording_window_toggled.emit)
 
         self.balance_raw_btn = QToolButton()
-        self.balance_raw_btn.setText("重新平衡")
-        self.balance_raw_btn.setToolTip("根據目前畫面分佈，自動切換至最接近的預設比例並套用 (會關閉自動追蹤)")
+        self.balance_raw_btn.setText("⚖️")
+        self.balance_raw_btn.setToolTip("自動平衡：根據目前畫面分佈重新計算預設比例")
 
-        self.auto_continuous_check = QCheckBox("自動平衡")
+        self.auto_continuous_check = QCheckBox("Auto")
         self.auto_continuous_check.setToolTip("開啟後會不斷自動調整參數，鎖定目前選擇的比例")
         self.auto_continuous_check.setChecked(False)
 
@@ -283,8 +281,8 @@ class ControlPanel(QWidget):
 
         self.balance_presets = QComboBox()
         self._update_balance_presets(settings.levels)
-        self.balance_presets.setFixedWidth(100)
-        self.balance_presets.setToolTip("平衡預設比例")
+        self.balance_presets.setFixedWidth(85)
+        self.balance_presets.setToolTip("平衡預設比例 (W:G:B)")
 
         self.logic_reset_btn = QToolButton()
         self.logic_reset_btn.setText("Reset")
@@ -347,25 +345,42 @@ class ControlPanel(QWidget):
 
 
         top_layout = QHBoxLayout()
-        top_layout.setContentsMargins(8, 8, 8, 4)
-        top_layout.setSpacing(10)
+        top_layout.setContentsMargins(10, 8, 10, 4)
+        top_layout.setSpacing(8)
+        
+        # 階層分組
         top_layout.addWidget(QLabel("階層"))
         top_layout.addWidget(self.levels)
         top_layout.addWidget(self.enabled_check)
-        top_layout.addSpacing(4)
+        
+        # 間隔線
+        v_line1 = QFrame()
+        v_line1.setFrameShape(QFrame.Shape.VLine)
+        v_line1.setStyleSheet("color: #444;")
+        top_layout.addWidget(v_line1)
+        
+        # 平衡工具組
         top_layout.addWidget(self.balance_presets)
         top_layout.addWidget(self.auto_continuous_check)
         top_layout.addWidget(self.balance_raw_btn)
+        
+        v_line2 = QFrame()
+        v_line2.setFrameShape(QFrame.Shape.VLine)
+        v_line2.setStyleSheet("color: #444;")
+        top_layout.addWidget(v_line2)
+        
+        # 擷取與功能組
         top_layout.addWidget(self.freeze_btn)
         top_layout.addWidget(self.screenshot_btn)
         top_layout.addWidget(self.image_mode_btn)
         top_layout.addWidget(self.distribution_btn)
         top_layout.addWidget(self.record_btn)
+        
         top_layout.addStretch(1)
         top_layout.addWidget(self.fps_label)
         top_layout.addWidget(self.collapse_btn)
         top_layout.addWidget(self.more_btn)
-        top_layout.addSpacing(10)
+        top_layout.addSpacing(6)
         top_layout.addWidget(self.min_btn)
         top_layout.addWidget(self.max_btn)
         top_layout.addWidget(self.close_btn)
@@ -375,11 +390,12 @@ class ControlPanel(QWidget):
         self.top_row_widget.setLayout(top_layout)
 
         row2 = QHBoxLayout()
-        row2.setContentsMargins(8, 0, 8, 2)
+        row2.setContentsMargins(10, 2, 10, 2)
         row2.setSpacing(8)
-        row2.addWidget(QLabel("輸入範圍"))
-        row2.addWidget(self.range_slider, 2)
+        row2.addWidget(QLabel("📥 輸入"))
+        row2.addWidget(self.range_slider, 1)
         self.logic_exp_label = QLabel("偏差")
+        self.logic_exp_label.setFixedWidth(100)
         row2.addWidget(self.logic_exp_label)
         row2.addWidget(self.exp_slider)
         row2.addWidget(self.logic_reset_btn)
@@ -414,11 +430,12 @@ class ControlPanel(QWidget):
         params_grid.setColumnStretch(5, 1)
 
         bottom_row = QHBoxLayout()
-        bottom_row.setContentsMargins(8, 0, 8, 4)
+        bottom_row.setContentsMargins(10, 2, 10, 6)
         bottom_row.setSpacing(8)
-        bottom_row.addWidget(QLabel("輸出範圍"))
-        bottom_row.addWidget(self.display_range_slider, 2)
+        bottom_row.addWidget(QLabel("📤 輸出"))
+        bottom_row.addWidget(self.display_range_slider, 1)
         self.display_exp_label = QLabel("偏差")
+        self.display_exp_label.setFixedWidth(100)
         bottom_row.addWidget(self.display_exp_label)
         bottom_row.addWidget(self.display_exp_slider)
         bottom_row.addWidget(self.display_reset_btn)
@@ -584,6 +601,48 @@ class ControlPanel(QWidget):
     def _request_raw_auto_balance(self) -> None:
         self.auto_balance_raw_requested.emit()
 
+    def update_presets_ui(self, presets: list[dict | None]) -> None:
+        """動態建立 20 組預設集選單。"""
+        self.preset_menu.clear()
+        
+        # 啟動預設集 (原有功能)
+        self.save_startup_action = QAction("儲存目前設定為「啟動預設」", self)
+        self.save_startup_action.triggered.connect(self.save_startup_requested.emit)
+        self.clear_startup_action = QAction("清除並恢復「上次關閉狀態」", self)
+        self.clear_startup_action.triggered.connect(self.clear_startup_requested.emit)
+        self.preset_menu.addAction(self.save_startup_action)
+        self.preset_menu.addAction(self.clear_startup_action)
+        self.preset_menu.addSeparator()
+
+        # 20 組欄位
+        for i in range(20):
+            preset = presets[i]
+            is_empty = preset is None
+            raw_name = preset["name"] if not is_empty else f"Slot {i+1}"
+            # 限制選單名稱長度
+            display_name = (raw_name[:15] + "...") if len(raw_name) > 15 else raw_name
+            
+            slot_menu = QMenu(f"{i+1:02d}. {display_name}", self)
+            if is_empty:
+                slot_menu.setStyleSheet("color: #777;")
+            
+            load_act = QAction("讀取 (Load)", self)
+            load_act.setEnabled(not is_empty)
+            load_act.triggered.connect(lambda checked=False, idx=i: self.load_preset_requested.emit(idx))
+            
+            save_act = QAction("儲存/更名 (Save & Rename)", self)
+            save_act.triggered.connect(lambda checked=False, idx=i: self.save_preset_requested.emit(idx))
+            
+            clear_act = QAction("清除 (Clear)", self)
+            clear_act.setEnabled(not is_empty)
+            clear_act.triggered.connect(lambda checked=False, idx=i: self.clear_preset_requested.emit(idx))
+            
+            slot_menu.addAction(load_act)
+            slot_menu.addAction(save_act)
+            slot_menu.addAction(clear_act)
+            
+            self.preset_menu.addMenu(slot_menu)
+
     def _update_balance_presets(self, n: int) -> None:
         """根據目前階層動態更新平衡預設選項。"""
         import itertools
@@ -674,6 +733,7 @@ class ControlPanel(QWidget):
         # Update labels
         self._emit_settings()
         self._emit_display_settings()
+        self.update_presets_ui(settings.presets)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:

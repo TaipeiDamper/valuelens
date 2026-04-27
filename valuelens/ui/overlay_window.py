@@ -4,6 +4,7 @@ import ctypes
 import itertools
 import sys
 import time
+from dataclasses import asdict
 from ctypes import wintypes
 
 import cv2
@@ -178,6 +179,9 @@ class OverlayWindow(QMainWindow):
         self.panel.clear_startup_requested.connect(self.on_clear_startup_preset)
         self.panel.debug_screenshot_requested.connect(self.on_debug_screenshot_requested)
         self.panel.recording_window_toggled.connect(self.on_recording_window_toggled)
+        self.panel.save_preset_requested.connect(self.on_save_preset)
+        self.panel.load_preset_requested.connect(self.on_load_preset)
+        self.panel.clear_preset_requested.connect(self.on_clear_preset)
         self.panel.show()
         self.panel.raise_()
         self._layout_panel()
@@ -1301,6 +1305,71 @@ class OverlayWindow(QMainWindow):
             self.toggle_maximize()
             self._is_dragging = False
             self._snap_timer.stop()
+
+    def on_save_preset(self, index: int) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        slot = self.settings.presets[index]
+        old_name = slot["name"] if slot else f"Slot {index + 1}"
+        
+        name, ok = QInputDialog.getText(self, "儲存預設集", f"請輸入 Slot {index+1} 的名稱:", text=old_name)
+        if not ok: return
+        
+        settings_dict = asdict(self.settings)
+        # 排除遞迴欄位與特定狀態
+        for key in ["presets", "startup_preset", "x", "y", "width", "height"]:
+            if key in settings_dict: del settings_dict[key]
+            
+        self.settings.presets[index] = {
+            "name": name,
+            "data": settings_dict
+        }
+        self.settings_manager.save(self.settings)
+        self.panel.update_presets_ui(self.settings.presets)
+
+    def on_load_preset(self, index: int) -> None:
+        slot = self.settings.presets[index]
+        if not slot: return
+        
+        data = slot["data"]
+        defaults = asdict(AppSettings())
+        # 保留目前的 presets 與視窗幾何
+        current_presets = self.settings.presets
+        current_geom = (self.settings.x, self.settings.y, self.settings.width, self.settings.height)
+        
+        merged = {**defaults, **data}
+        merged["presets"] = current_presets
+        merged["x"], merged["y"], merged["width"], merged["height"] = current_geom
+        
+        self.settings = AppSettings(**merged)
+        self.panel.sync_from_settings(self.settings)
+        # 觸發 UI 同步
+        self.on_settings_changed(self.settings.levels, self.settings.min_value, self.settings.max_value, self.settings.exp_value)
+        self.on_display_settings_changed(self.settings.display_min_value, self.settings.display_max_value, self.settings.display_exp_value)
+        self.on_effect_settings_changed(self.settings.blur_enabled, self.settings.blur_radius, self.settings.dither_enabled, self.settings.dither_strength)
+        self.on_edge_settings_changed(self.settings.edge_enabled, self.settings.edge_strength, self.settings.edge_mix)
+        self.on_morph_settings_changed(self.settings.morph_enabled, self.settings.morph_strength)
+        self.on_order_changed(self.settings.process_order)
+
+    def on_clear_preset(self, index: int) -> None:
+        self.settings.presets[index] = None
+        self.settings_manager.save(self.settings)
+        self.panel.update_presets_ui(self.settings.presets)
+
+    def on_save_startup_preset(self) -> None:
+        settings_dict = asdict(self.settings)
+        # 排除遞迴欄位與特定狀態
+        for key in ["presets", "startup_preset", "x", "y", "width", "height"]:
+            if key in settings_dict: del settings_dict[key]
+        self.settings.startup_preset = settings_dict
+        self.settings_manager.save(self.settings)
+
+    def on_clear_startup_preset(self) -> None:
+        self.settings.startup_preset = None
+        self.settings_manager.save(self.settings)
+
+    def on_debug_screenshot_requested(self) -> None:
+        # 如果有實作擷取全螢幕的方法則呼叫，否則使用一般截圖
+        self.on_screenshot_requested()
 
     def changeEvent(self, event) -> None:  # type: ignore[override]
         """監聽視窗狀態改變（如透過系統熱鍵或拖曳最大化），同步按鈕圖示。"""
