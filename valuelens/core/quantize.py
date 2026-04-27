@@ -3,9 +3,32 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-# Cache for performance
+# Cache for the LUT to avoid re-calculating if parameters haven't changed
+_CURRENT_QUANT_LUT: tuple[tuple, np.ndarray] | None = None
+
+def get_quantization_lut(levels: int, min_val: int, max_val: int, exp_val: float) -> np.ndarray:
+    global _CURRENT_QUANT_LUT
+    params = (levels, min_val, max_val, exp_val)
+    if _CURRENT_QUANT_LUT is not None and _CURRENT_QUANT_LUT[0] == params:
+        return _CURRENT_QUANT_LUT[1]
+    
+    inputs = np.arange(256, dtype=np.float32)
+    denom = max(1, max_val - min_val)
+    norm = (inputs - min_val) / denom
+    norm = np.clip(norm, 0.0, 1.0)
+    
+    if exp_val != 0:
+        gamma = float(np.power(2.0, float(exp_val)))
+        norm = np.power(norm, gamma)
+        
+    idx = np.floor(norm * levels)
+    idx = np.clip(idx, 0, levels - 1).astype(np.uint8)
+    
+    _CURRENT_QUANT_LUT = (params, idx)
+    return idx
+
+# Bayer Cache
 _BAYER_CACHE: dict[tuple[int, int], np.ndarray] = {}
-_GAMMA_LUT_CACHE: dict[float, np.ndarray] = {}
 
 def get_bayer_tiled(h: int, w: int) -> np.ndarray:
     key = (h, w)
@@ -24,36 +47,20 @@ def get_bayer_tiled(h: int, w: int) -> np.ndarray:
     _BAYER_CACHE[key] = tiled
     return tiled
 
-def get_gamma_lut(exp_value: float) -> np.ndarray:
-    if exp_value == 0:
-        return np.arange(256, dtype=np.uint8)
-    
-    if exp_value in _GAMMA_LUT_CACHE:
-        return _GAMMA_LUT_CACHE[exp_value]
-    
-    gamma = float(np.power(2.0, float(exp_value)))
-    lut = np.power(np.arange(256) / 255.0, gamma) * 255.0
-    lut = np.clip(lut, 0, 255).astype(np.uint8)
-    _GAMMA_LUT_CACHE[exp_value] = lut
-    return lut
-
 def apply_bilateral(gray: np.ndarray, radius: int = 5) -> np.ndarray:
     if radius <= 0:
         return gray
     d = radius * 2 + 1
-    # Optimization: if radius is large, process on a smaller scale
     if radius > 15:
         h, w = gray.shape
         small = cv2.resize(gray, (w // 2, h // 2), interpolation=cv2.INTER_LINEAR)
         filtered = cv2.bilateralFilter(small, d // 2 + 1, 75, 75)
         return cv2.resize(filtered, (w, h), interpolation=cv2.INTER_LINEAR)
-    
     return cv2.bilateralFilter(gray, d, 75, 75)
 
 def apply_ordered_dither(gray: np.ndarray) -> np.ndarray:
     h, w = gray.shape
     bayer_tiled = get_bayer_tiled(h, w)
-    # Using float32 for stable calculation, then back to uint8
     res = gray.astype(np.float32) + (bayer_tiled * 0.5)
     return np.clip(res, 0, 255).astype(np.uint8)
 
@@ -77,48 +84,50 @@ def quantize_gray_with_indices(
     
     # --- Stage 1: Core Quantization ---
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    
+    # We maintain two versions: 
+    # - working_gray: used for final color/indices (can be dithered)
+    # - structure_gray: used for edge/morph detection (always clean)
     working_gray = gray
+    structure_gray = gray
     
     indices = None
     edges = None
     morph_mask = None
 
     def apply_quantization(img_gray):
-        # Use LUT for Gamma
-        lut = get_gamma_lut(exp_value)
-        img_lut = cv2.LUT(img_gray, lut)
-        
-        # Fast normalization and floor
-        denom = max(1, max_value - min_value)
-        f = img_lut.astype(np.float32)
-        norm = (f - min_value) * (levels / denom)
-        # Fix: ensure no NaN/Inf and clip before casting to int
-        norm = np.nan_to_num(norm, nan=0.0, posinf=float(levels-1), neginf=0.0)
-        idx = np.clip(norm, 0, levels - 1).astype(np.int32)
-        return idx
+        lut = get_quantization_lut(levels, min_value, max_value, exp_value)
+        idx = cv2.LUT(img_gray, lut)
+        return idx.astype(np.int32)
 
     # Execute Modular Pipeline
     for step in process_order:
         if step == "blur" and blur_radius > 0:
+            # Blur applies to both
             working_gray = apply_bilateral(working_gray, blur_radius)
+            structure_gray = working_gray
         elif step == "dither" and dither_strength > 0:
+            # Dither ONLY applies to working_gray
             working_gray = apply_ordered_dither(working_gray)
             indices = apply_quantization(working_gray)
         elif step == "edge" and edge_strength > 0:
+            # Edges should use structure_gray or clean indices to avoid dither noise
             if indices is not None:
-                # Use cached levels logic
-                edge_input = (indices * (255 // (levels - 1))).astype(np.uint8)
+                # If dither was first, indices has noise. We use structure_gray instead or re-calc clean indices
+                clean_indices = apply_quantization(structure_gray)
+                edge_input = (clean_indices * (255 // (levels - 1))).astype(np.uint8)
             else:
-                edge_input = working_gray
+                edge_input = structure_gray
             t1 = max(1, int(255 - edge_strength * 2.54))
             t2 = t1 * 2
             edges = cv2.Canny(edge_input, t1, t2)
         elif step == "morph" and morph_enabled and morph_strength > 0:
+            # Morph ALWAYS uses structure_gray to avoid dither noise
             k_size = morph_strength * 2 + 1
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
-            # Optimization: Morph can be expensive on high-res, but we'll stick to full res for quality unless asked
-            morph_grad = cv2.morphologyEx(working_gray, cv2.MORPH_GRADIENT, kernel)
-            morph_mask = morph_grad > 30
+            morph_grad = cv2.morphologyEx(structure_gray, cv2.MORPH_GRADIENT, kernel)
+            # Use a slightly higher threshold for morph to be cleaner
+            morph_mask = morph_grad > 35
 
     if indices is None:
         indices = apply_quantization(working_gray)
@@ -128,15 +137,11 @@ def quantize_gray_with_indices(
     d_max = display_max if display_max is not None else 255
     d_exp = display_exp if display_exp is not None else 0
     
-    # Pre-calc display map to avoid slow power/float ops per frame if simple
-    if d_exp == 0 and d_min == 0 and d_max == 255:
-        out = (indices * (255 // (levels - 1))).astype(np.uint8)
-    else:
-        norm = indices.astype(np.float32) / (levels - 1)
-        if d_exp != 0:
-            gamma_display = float(np.power(2.0, float(d_exp)))
-            norm = np.power(norm, gamma_display)
-        out = (norm * (d_max - d_min) + d_min).astype(np.uint8)
+    norm = indices.astype(np.float32) / (levels - 1)
+    if d_exp != 0:
+        gamma_display = float(np.power(2.0, float(d_exp)))
+        norm = np.power(norm, gamma_display)
+    out = (norm * (d_max - d_min) + d_min).astype(np.uint8)
     
     if morph_mask is not None:
         out[morph_mask] = 0

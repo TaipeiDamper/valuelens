@@ -581,18 +581,27 @@ class OverlayWindow(QMainWindow):
             self.settings.exp_value,
         )
         
+        # 參數平滑處理 (防止跳動)
+        # 如果變動極小，則不更新；如果變動中等，則混合一部分舊值
+        def smooth(new, old, alpha=0.3):
+            if abs(new - old) < 0.5: return old
+            return old * (1 - alpha) + new * alpha
+
+        if self._auto_continuous_enabled:
+            # 持續模式下使用平滑
+            lower = int(round(smooth(lower, self.settings.min_value, 0.4)))
+            upper = int(round(smooth(upper, self.settings.max_value, 0.4)))
+            exp_value = smooth(exp_value, self.settings.exp_value, 0.3)
+        
         changed = (
             abs(lower - self.settings.min_value) >= 1 or
             abs(upper - self.settings.max_value) >= 1 or
-            abs(exp_value - self.settings.exp_value) > 0.01
+            abs(exp_value - self.settings.exp_value) > 0.02
         )
         
         if changed:
             self._apply_balance_to_ui(lower, upper, exp_value)
             self._last_frame_signature = None
-            
-        self.refresh_frame()
-        self.update()
 
     def on_auto_continuous_toggled(self, enabled: bool) -> None:
         """切換持續自動平衡。"""
@@ -1139,17 +1148,17 @@ class OverlayWindow(QMainWindow):
         guess_min = find_val(pct_black)
         guess_max = find_val(pct_not_white)
         
-        # 4. CDF 基於百分比的網格搜尋 (非均勻取樣)
-        # 我們在目標百分比周圍尋找可能的切分點，這會讓搜尋點位自動集中在直方圖密集的區域
-        p_samples = np.linspace(-0.08, 0.08, 9) # 搜尋範圍為 +/- 8% 的人口比例
+        # 4. 增加採樣密度與範圍
+        # 搜尋範圍為 +/- 12% 的人口比例，採樣 13 個點
+        p_samples = np.linspace(-0.12, 0.12, 13) 
         
         lo_candidates = sorted(list(set([find_val(pct_black + s) for s in p_samples] + [guess_min])))
         hi_candidates = sorted(list(set([find_val(pct_not_white + s) for s in p_samples] + [guess_max])))
-        # Exp 搜尋點位 (維持均勻但可選增加)
-        exp_range = np.linspace(-1.5, 1.5, 13)
+        # Exp 搜尋點位增加到 25 個點，覆蓋更細膩的曲線
+        exp_range = np.linspace(-1.5, 1.5, 25)
 
         best_loss = float('inf')
-        best_params = (guess_min, guess_max, current_exp)
+        best_params = (current_min, current_max, current_exp)
         levels = max(2, int(self.settings.levels))
         target_ratios = np.array([t_black, t_gray, t_white]) / t_total
         
