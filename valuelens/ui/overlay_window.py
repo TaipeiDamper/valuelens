@@ -15,7 +15,8 @@ from PySide6.QtWidgets import QMainWindow, QToolButton
 from valuelens.config.settings import AppSettings, SettingsManager
 from valuelens.core.capture_service import CaptureService
 from valuelens.core.hotkey_service import HotkeyService
-from valuelens.core.quantize import quantize_gray, quantize_gray_with_indices
+from valuelens.core.qt_image import bgr_to_qimage, gray_to_qimage, qimage_to_bgr
+from valuelens.core.quantize import native_distribution_from_indices, quantize_gray, quantize_gray_with_indices
 from valuelens.modes.image_mode import ImageModeDialog
 from valuelens.ui.control_panel import ControlPanel
 from valuelens.ui.mirror_window import MirrorWindow
@@ -381,6 +382,21 @@ class OverlayWindow(QMainWindow):
         self.refresh_frame()
         self.update()
 
+    def _sync_image_mode_settings(self) -> None:
+        self.image_mode.set_quantize_settings(
+            self.settings.levels,
+            self.settings.min_value,
+            self.settings.max_value,
+            self.settings.exp_value,
+            self.settings.blur_enabled,
+            self.settings.blur_radius,
+            self.settings.dither_enabled,
+            self.settings.dither_strength,
+            self.settings.process_order,
+            self.settings.morph_enabled,
+            self.settings.morph_strength,
+        )
+
     def open_image_mode(self) -> None:
         """開啟檔案選擇器匯入圖片。"""
         from PySide6.QtWidgets import QFileDialog
@@ -413,11 +429,7 @@ class OverlayWindow(QMainWindow):
         if mime.hasImage():
             qimg = QImage(mime.imageData())
             if not qimg.isNull():
-                converted = qimg.convertToFormat(QImage.Format.Format_RGBA8888)
-                ptr = converted.bits()
-                arr = np.frombuffer(ptr, np.uint8).reshape((converted.height(), converted.width(), 4))
-                bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-                self.import_image(bgr)
+                self.import_image(qimage_to_bgr(qimg))
 
     def on_settings_changed(
         self, levels: int, min_value: int, max_value: int, exp_value: float
@@ -458,13 +470,7 @@ class OverlayWindow(QMainWindow):
         self.settings.min_value = min_value
         self.settings.max_value = max_value
         self.settings.exp_value = exp_value
-        self.image_mode.set_quantize_settings(
-            levels, min_value, max_value, exp_value,
-            self.settings.blur_enabled, self.settings.blur_radius,
-            self.settings.dither_enabled, self.settings.dither_strength,
-            self.settings.process_order,
-            self.settings.morph_enabled, self.settings.morph_strength
-        )
+        self._sync_image_mode_settings()
         self._processed_distribution_pct = [0.0] * max(2, int(levels))
         self._raw_distribution_pct = [0.0] * max(2, int(levels))
         self._last_frame_signature = None
@@ -486,12 +492,7 @@ class OverlayWindow(QMainWindow):
         self.settings.dither_enabled = dither_enabled
         self.settings.dither_strength = dither_strength
         # Update image mode if active
-        self.image_mode.set_quantize_settings(
-            self.settings.levels, self.settings.min_value, self.settings.max_value, self.settings.exp_value,
-            blur_enabled, blur_radius,
-            dither_enabled, dither_strength, self.settings.process_order,
-            self.settings.morph_enabled, self.settings.morph_strength
-        )
+        self._sync_image_mode_settings()
         self._last_frame_signature = None
         self.request_refresh(16)
 
@@ -504,12 +505,7 @@ class OverlayWindow(QMainWindow):
     def on_morph_settings_changed(self, enabled: bool, strength: int) -> None:
         self.settings.morph_enabled = enabled
         self.settings.morph_strength = strength
-        self.image_mode.set_quantize_settings(
-            self.settings.levels, self.settings.min_value, self.settings.max_value, self.settings.exp_value,
-            self.settings.blur_enabled, self.settings.blur_radius,
-            self.settings.dither_enabled, self.settings.dither_strength, self.settings.process_order,
-            enabled, strength
-        )
+        self._sync_image_mode_settings()
         self._last_frame_signature = None
         self.request_refresh(16)
 
@@ -556,13 +552,7 @@ class OverlayWindow(QMainWindow):
         self.settings.min_value = lower
         self.settings.max_value = upper
         self.settings.exp_value = exp_value
-        self.image_mode.set_quantize_settings(
-            self.settings.levels, lower, upper, exp_value,
-            self.settings.blur_enabled, self.settings.blur_radius,
-            self.settings.dither_enabled, self.settings.dither_strength,
-            self.settings.process_order,
-            self.settings.morph_enabled, self.settings.morph_strength
-        )
+        self._sync_image_mode_settings()
 
     def on_auto_balance_target_requested(self, ratios: tuple[float, float, float]) -> None:
         # 決定計算來源：是當前可見的 viewport 還是整張圖片
@@ -838,13 +828,8 @@ class OverlayWindow(QMainWindow):
 
             # --- Bypass 模式：跳過量化，直接顯示原始影像 ---
             if self._bypass_mode:
-                raw_rgb = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                self._frame_array = raw_rgb
-                qimg = QImage(
-                    raw_rgb.data, w, h,
-                    raw_rgb.strides[0],
-                    QImage.Format.Format_RGB888,
-                )
+                self._frame_array = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                qimg = bgr_to_qimage(frame)
                 qimg.setDevicePixelRatio(dpr)
                 self._frame = QPixmap.fromImage(qimg)
                 self._processed_distribution_pct = [0.0] * max(2, int(self.settings.levels))
@@ -894,20 +879,11 @@ class OverlayWindow(QMainWindow):
                         final_bgr[edges > 0] = ec
                     
                     # 轉回 RGB 給 QImage
-                    out_rgb = cv2.cvtColor(final_bgr, cv2.COLOR_BGR2RGB)
-                    self._frame_array = out_rgb
-                    qimg = QImage(
-                        out_rgb.data, w, h,
-                        out_rgb.strides[0],
-                        QImage.Format.Format_RGB888,
-                    )
+                    self._frame_array = np.ascontiguousarray(cv2.cvtColor(final_bgr, cv2.COLOR_BGR2RGB))
+                    qimg = bgr_to_qimage(final_bgr)
                 else:
                     self._frame_array = logic_quantized
-                    qimg = QImage(
-                        logic_quantized.data, w, h,
-                        logic_quantized.strides[0],
-                        QImage.Format.Format_Grayscale8,
-                    )
+                    qimg = gray_to_qimage(logic_quantized)
                 
                 qimg.setDevicePixelRatio(dpr)
                 self._frame = QPixmap.fromImage(qimg)
@@ -918,19 +894,10 @@ class OverlayWindow(QMainWindow):
                 if self.settings.compare_bw:
                     gray_cont = np.ascontiguousarray(self._last_gray_frame)
                     self._raw_frame_array = gray_cont
-                    raw_qimg = QImage(
-                        gray_cont.data, w, h,
-                        gray_cont.strides[0],
-                        QImage.Format.Format_Grayscale8,
-                    )
+                    raw_qimg = gray_to_qimage(gray_cont)
                 else:
-                    raw_rgb = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                    self._raw_frame_array = raw_rgb
-                    raw_qimg = QImage(
-                        raw_rgb.data, w, h,
-                        raw_rgb.strides[0],
-                        QImage.Format.Format_RGB888,
-                    )
+                    self._raw_frame_array = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                    raw_qimg = bgr_to_qimage(frame)
                 raw_qimg.setDevicePixelRatio(dpr)
                 self._raw_frame = QPixmap.fromImage(raw_qimg)
             else:
@@ -1053,6 +1020,9 @@ class OverlayWindow(QMainWindow):
         level_count = max(2, int(levels))
         if indices is None or indices.size == 0:
             return [0.0] * level_count
+        native_dist = native_distribution_from_indices(indices, level_count)
+        if native_dist is not None and native_dist.size == level_count:
+            return native_dist.tolist()
         clamped = np.clip(indices.astype(np.int32), 0, level_count - 1)
         counts = np.bincount(clamped.reshape(-1), minlength=level_count).astype(np.float64)
         total = float(counts.sum())
@@ -1489,11 +1459,7 @@ class OverlayWindow(QMainWindow):
             clipboard = QApplication.clipboard()
             qimg = clipboard.image()
             if not qimg.isNull():
-                converted = qimg.convertToFormat(QImage.Format.Format_RGBA8888)
-                ptr = converted.bits()
-                arr = np.frombuffer(ptr, np.uint8).reshape((converted.height(), converted.width(), 4))
-                bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-                self.import_image(bgr)
+                self.import_image(qimage_to_bgr(qimg))
             return
         super().keyPressEvent(event)
 

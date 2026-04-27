@@ -17,21 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from valuelens.core.quantize import quantize_gray
-
-
-def _qimage_to_bgr(image: QImage) -> np.ndarray:
-    converted = image.convertToFormat(QImage.Format.Format_RGBA8888)
-    ptr = converted.bits()
-    arr = np.frombuffer(ptr, np.uint8).reshape((converted.height(), converted.width(), 4))
-    rgb = cv2.cvtColor(arr, cv2.COLOR_RGBA2RGB)
-    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-
-
-def _bgr_to_qpixmap(image: np.ndarray) -> QPixmap:
-    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    h, w, _ = rgb.shape
-    qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format.Format_RGB888)
-    return QPixmap.fromImage(qimg.copy())
+from valuelens.core.qt_image import bgr_to_qpixmap, qimage_to_bgr
 
 
 class ImageModeDialog(QDialog):
@@ -130,7 +116,7 @@ class ImageModeDialog(QDialog):
             return
         self._source = image
         self._result = None
-        self.preview.setPixmap(_bgr_to_qpixmap(image).scaled(
+        self.preview.setPixmap(bgr_to_qpixmap(image).scaled(
             self.preview.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
@@ -142,9 +128,9 @@ class ImageModeDialog(QDialog):
         if qimg.isNull():
             QMessageBox.information(self, "提示", "剪貼簿中沒有圖片")
             return
-        self._source = _qimage_to_bgr(qimg)
+        self._source = qimage_to_bgr(qimg)
         self._result = None
-        self.preview.setPixmap(_bgr_to_qpixmap(self._source).scaled(
+        self.preview.setPixmap(bgr_to_qpixmap(self._source).scaled(
             self.preview.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
@@ -178,7 +164,7 @@ class ImageModeDialog(QDialog):
             morph_enabled=self.morph_enabled,
             morph_strength=self.morph_strength
         )
-        self.preview.setPixmap(_bgr_to_qpixmap(self._result).scaled(
+        self.preview.setPixmap(bgr_to_qpixmap(self._result).scaled(
             self.preview.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
@@ -188,7 +174,7 @@ class ImageModeDialog(QDialog):
         if self._result is None:
             QMessageBox.information(self, "提示", "請先套用參數")
             return
-        qpixmap = _bgr_to_qpixmap(self._result)
+        qpixmap = bgr_to_qpixmap(self._result)
         QGuiApplication.clipboard().setPixmap(qpixmap)
 
     def save_result(self) -> None:

@@ -3,6 +3,11 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+try:
+    import valuelens_native as _native_quant
+except Exception:
+    _native_quant = None
+
 # Cache for the LUT to avoid re-calculating if parameters haven't changed
 _CURRENT_QUANT_LUT: tuple[tuple, np.ndarray] | None = None
 
@@ -64,6 +69,21 @@ def apply_ordered_dither(gray: np.ndarray) -> np.ndarray:
     res = gray.astype(np.float32) + (bayer_tiled * 0.5)
     return np.clip(res, 0, 255).astype(np.uint8)
 
+
+def has_native_acceleration() -> bool:
+    return _native_quant is not None
+
+
+def native_distribution_from_indices(indices: np.ndarray, levels: int) -> np.ndarray | None:
+    """Return level distribution (%) using native module when available."""
+    if _native_quant is None:
+        return None
+    try:
+        out = _native_quant.distribution_from_indices(indices, max(2, int(levels)))
+        return np.asarray(out, dtype=np.float64)
+    except Exception:
+        return None
+
 def quantize_gray_with_indices(
     bgr: np.ndarray,
     levels: int,
@@ -81,6 +101,41 @@ def quantize_gray_with_indices(
     morph_strength: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     levels = max(2, int(levels))
+
+    # Native fast path covers baseline quantization only (no additional effects).
+    can_use_native = (
+        _native_quant is not None
+        and blur_radius <= 0
+        and dither_strength <= 0
+        and edge_strength <= 0
+        and (not morph_enabled or morph_strength <= 0)
+        and bgr.dtype == np.uint8
+        and bgr.ndim == 3
+        and bgr.shape[2] >= 3
+    )
+    if can_use_native:
+        try:
+            d_min = display_min if display_min is not None else 0
+            d_max = display_max if display_max is not None else 255
+            d_exp = display_exp if display_exp is not None else 0
+            out_gray, indices = _native_quant.quantize_fast(
+                np.ascontiguousarray(bgr),
+                levels,
+                int(min_value),
+                int(max_value),
+                float(exp_value),
+                int(d_min),
+                int(d_max),
+                float(d_exp),
+            )
+            return (
+                np.asarray(out_gray, dtype=np.uint8),
+                np.asarray(indices, dtype=np.int32),
+                None,
+            )
+        except Exception:
+            # Any native failure should gracefully fallback to Python/OpenCV path.
+            pass
     
     # --- Stage 1: Core Quantization ---
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)

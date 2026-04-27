@@ -581,35 +581,27 @@ class ControlPanel(QWidget):
         self.balance_presets.blockSignals(False)
 
     def set_balance_preset(self, ratio_wgb: tuple[float, float, float], mark_best: bool = False) -> None:
-        best_idx = 0
-        best_dist = float("inf")
-        # 從 ComboBox 中遍歷所有選項，找出最接近的
-        for i in range(self.balance_presets.count()):
-            preset = self.balance_presets.itemData(i)
-            if preset is None: continue
-            dist = sum((preset[j] - ratio_wgb[j]) ** 2 for j in range(3))
-            if dist < best_dist:
-                best_dist = dist
-                best_idx = i
-
+        best_idx = self._best_preset_index(ratio_wgb)
         self.balance_presets.blockSignals(True)
         self.balance_presets.setCurrentIndex(best_idx)
         self.balance_presets.blockSignals(False)
 
     def nearest_balance_preset(self, ratio_wgb: tuple[float, float, float]) -> tuple[float, float, float]:
+        preset = self.balance_presets.itemData(self._best_preset_index(ratio_wgb))
+        return preset if preset is not None else (70.0, 20.0, 10.0)
+
+    def _best_preset_index(self, ratio_wgb: tuple[float, float, float]) -> int:
         best_idx = 0
         best_dist = float("inf")
-        best_preset = (70.0, 20.0, 10.0)
-        
         for i in range(self.balance_presets.count()):
             preset = self.balance_presets.itemData(i)
-            if preset is None: continue
+            if preset is None:
+                continue
             dist = sum((preset[j] - ratio_wgb[j]) ** 2 for j in range(3))
             if dist < best_dist:
                 best_dist = dist
                 best_idx = i
-                best_preset = preset
-        return best_preset
+        return best_idx
 
     def _reset_logic_settings(self) -> None:
         self.range_slider.set_values(0, 255)
