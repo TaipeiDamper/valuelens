@@ -44,8 +44,10 @@ class _RECT(ctypes.Structure):
 class OverlayWindow(QMainWindow):
     def __init__(self, settings: AppSettings) -> None:
         super().__init__()
-        self.settings = settings
-        self.settings_manager = SettingsManager()
+        from valuelens.core.store import AppStore
+        self.store = AppStore()
+        self.settings = self.store.settings
+        self.settings_manager = self.store._manager
         
         # 如果有啟動預設集，則在此處套用它
         if self.settings.startup_preset:
@@ -472,19 +474,14 @@ class OverlayWindow(QMainWindow):
                 # 其他情況（例如第一次進入），執行全域最佳
                 self._auto_balance_use_current = False
             
-        self.settings.levels = levels
-        self.settings.min_value = min_value
-        self.settings.max_value = max_value
-        self.settings.exp_value = exp_value
+        self.store.update(levels=levels, min_value=min_value, max_value=max_value, exp_value=exp_value)
         self._processed_distribution_pct = [0.0] * max(2, int(levels))
         self._raw_distribution_pct = [0.0] * max(2, int(levels))
         self._last_frame_signature = None
         self.request_refresh(5)
 
     def on_display_settings_changed(self, min_value: int, max_value: int, exp_value: float) -> None:
-        self.settings.display_min_value = min_value
-        self.settings.display_max_value = max_value
-        self.settings.display_exp_value = exp_value
+        self.store.update(display_min_value=min_value, display_max_value=max_value, display_exp_value=exp_value)
         self._last_frame_signature = None
         self.request_refresh(16)
 
@@ -492,23 +489,18 @@ class OverlayWindow(QMainWindow):
         self, blur_enabled: bool, blur_radius: int,
         dither_enabled: bool, dither_strength: int
     ) -> None:
-        self.settings.blur_enabled = blur_enabled
-        self.settings.blur_radius = blur_radius
-        self.settings.dither_enabled = dither_enabled
-        self.settings.dither_strength = dither_strength
+        self.store.update(blur_enabled=blur_enabled, blur_radius=blur_radius, dither_enabled=dither_enabled, dither_strength=dither_strength)
         self._last_frame_signature = None
         self.request_refresh(16)
 
     def on_order_changed(self, order: list[str]) -> None:
-        self.settings.process_order = order
+        self.store.update(process_order=order)
         self.image_mode.process_order = order
         self._last_frame_signature = None
         self.request_refresh(16)
 
     def on_morph_settings_changed(self, enabled: bool, strength: int, threshold: int = 35) -> None:
-        self.settings.morph_enabled = enabled
-        self.settings.morph_strength = strength
-        self.settings.morph_threshold = threshold
+        self.store.update(morph_enabled=enabled, morph_strength=strength, morph_threshold=threshold)
         self._last_frame_signature = None
         self.request_refresh(16)
 
@@ -524,20 +516,20 @@ class OverlayWindow(QMainWindow):
 
     def on_compare_mode_changed(self, enabled: bool) -> None:
         self._compare_mode = enabled
-        self.settings.compare_mode = enabled
+        self.store.update(compare_mode=enabled)
         self._last_frame_signature = None
         self._raw_frame = QPixmap()
         self._layout_overlay_buttons()
         self.request_refresh()
 
     def on_compare_bw_changed(self, bw_enabled: bool) -> None:
-        self.settings.compare_bw = bw_enabled
+        self.store.update(compare_bw=bw_enabled)
         self._last_frame_signature = None
         self._raw_frame = QPixmap()
         self.request_refresh()
 
     def on_hotkey_changed(self, hotkey: str) -> None:
-        self.settings.hotkey = hotkey
+        self.store.update(hotkey=hotkey)
         self.hotkeys.register("toggle", hotkey, self.toggle_enabled)
 
     def _apply_balance_to_ui(self, lower: int, upper: int, exp_value: float) -> None:
@@ -551,10 +543,8 @@ class OverlayWindow(QMainWindow):
         self.panel.exp_slider.blockSignals(False)
         self.panel.range_slider.blockSignals(False)
         
-        # 同步更新本地與圖片模式設定
-        self.settings.min_value = lower
-        self.settings.max_value = upper
-        self.settings.exp_value = exp_value
+        # 同步更新本地設定
+        self.store.update(min_value=lower, max_value=upper, exp_value=exp_value)
     def on_auto_balance_target_requested(self, ratios: tuple[float, float, float]) -> None:
         # 決定計算來源：是當前可見的 viewport 還是整張圖片
         source_gray = self._last_gray_frame
@@ -608,9 +598,7 @@ class OverlayWindow(QMainWindow):
 
     def on_edge_settings_changed(self, enabled: bool, strength: int, mix: int) -> None:
         """邊緣檢測設定變更。"""
-        self.settings.edge_enabled = enabled
-        self.settings.edge_strength = strength
-        self.settings.edge_mix = mix
+        self.store.update(edge_enabled=enabled, edge_strength=strength, edge_mix=mix)
         self._last_frame_signature = None
         self.request_refresh(16)
 
@@ -651,7 +639,7 @@ class OverlayWindow(QMainWindow):
         if now - self._last_toggle_ts < 0.25:
             return
         self._last_toggle_ts = now
-        self.settings.enabled = not self.settings.enabled
+        self.store.update(enabled=not self.settings.enabled)
         self.panel.enabled_check.setChecked(self.settings.enabled)
         self._last_frame_signature = None
         self.request_refresh()
@@ -1165,7 +1153,7 @@ class OverlayWindow(QMainWindow):
             "name": name,
             "data": settings_dict
         }
-        self.settings_manager.save(self.settings)
+        self.store._manager.save(self.settings)
         self.panel.update_presets_ui(self.settings.presets)
 
     def on_load_preset(self, index: int) -> None:
@@ -1183,7 +1171,9 @@ class OverlayWindow(QMainWindow):
         merged["presets"] = current_presets
         merged["x"], merged["y"], merged["width"], merged["height"] = current_geom
         
-        self.settings = AppSettings(**merged)
+        for k, v in merged.items():
+            setattr(self.settings, k, v)
+            
         self.panel.sync_from_settings(self.settings)
         # 觸發 UI 同步
         self.on_settings_changed(self.settings.levels, self.settings.min_value, self.settings.max_value, self.settings.exp_value)
@@ -1195,20 +1185,19 @@ class OverlayWindow(QMainWindow):
 
     def on_clear_preset(self, index: int) -> None:
         self.settings.presets[index] = None
-        self.settings_manager.save(self.settings)
+        self.store._manager.save(self.settings)
         self.panel.update_presets_ui(self.settings.presets)
 
     def on_save_startup_preset(self) -> None:
         settings_dict = asdict(self.settings)
-        # 排除遞迴欄位與特定狀態
         for key in ["presets", "startup_preset", "x", "y", "width", "height"]:
             if key in settings_dict: del settings_dict[key]
         self.settings.startup_preset = settings_dict
-        self.settings_manager.save(self.settings)
+        self.store._manager.save(self.settings)
 
     def on_clear_startup_preset(self) -> None:
         self.settings.startup_preset = None
-        self.settings_manager.save(self.settings)
+        self.store._manager.save(self.settings)
 
     def on_debug_screenshot_requested(self) -> None:
         # 如果有實作擷取全螢幕的方法則呼叫，否則使用一般截圖
@@ -1369,11 +1358,7 @@ class OverlayWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         geom = self.geometry()
-        self.settings.x = geom.x()
-        self.settings.y = geom.y()
-        self.settings.width = geom.width()
-        self.settings.height = geom.height()
-        self.settings_manager.save(self.settings)
+        self.store.update(x=geom.x(), y=geom.y(), width=geom.width(), height=geom.height())
         self.hotkeys.shutdown()
         self.panel.close()
         self.image_mode.close()
