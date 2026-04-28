@@ -32,7 +32,7 @@ class ImageProcessWorker(QThread):
         self._is_stopping = True
         self._pending_task = None
         self.quit()
-        self.wait()
+        self.wait(1000)
 
     def run(self) -> None:
         while self._pending_task is not None and not self._is_stopping:

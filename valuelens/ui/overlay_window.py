@@ -56,6 +56,8 @@ class OverlayWindow(QMainWindow):
         self.capture = CaptureService()
         self.hotkeys = HotkeyService()
         
+        self.store.state_changed.connect(self._on_state_changed)
+        
         self.calc_worker = ImageProcessWorker(self)
         self.calc_worker.finished.connect(self._on_calc_finished)
         self.image_mode = ImageModeDialog(settings=self.settings, parent=self)
@@ -217,7 +219,7 @@ class OverlayWindow(QMainWindow):
         """切換灰階比例顯示。"""
         self._show_distribution = show
         self._layout_overlay_buttons()
-        self.update()
+        self._update_canvas()
 
     def on_global_calc_toggled(self, enabled: bool) -> None:
         self._use_global_calc = enabled
@@ -226,13 +228,13 @@ class OverlayWindow(QMainWindow):
         self._auto_balance_pending = True
         self._auto_balance_use_current = True
         self.request_refresh(5)
-        self.update()
+        self._update_canvas()
     def on_bypass_toggled(self, bypass: bool) -> None:
         """切換 Bypass 模式：跳過所有處理，顯示原始影像。"""
         self._bypass_mode = bypass
         self._last_frame_signature = None
         self.refresh_frame()
-        self.update()
+        self._update_canvas()
 
 
     def on_recording_window_toggled(self, enabled: bool) -> None:
@@ -383,7 +385,7 @@ class OverlayWindow(QMainWindow):
         self._auto_balance_use_current = True
         
         self.refresh_frame()
-        self.update()
+        self._update_canvas()
 
     def import_image(self, bgr_image: np.ndarray) -> None:
         """匯入外部圖片，進入 StaticMode (Image 類型)。"""
@@ -408,7 +410,7 @@ class OverlayWindow(QMainWindow):
         self._auto_balance_pending = True
         self._auto_balance_use_current = True
         self.refresh_frame()
-        self.update()
+        self._update_canvas()
 
     def open_image_mode(self) -> None:
         """開啟檔案選擇器匯入圖片。"""
@@ -444,6 +446,33 @@ class OverlayWindow(QMainWindow):
             qimg = QImage(mime.imageData())
             if not qimg.isNull():
                 self.import_image(qimage_to_bgr(qimg))
+
+    def _on_state_changed(self, changed_keys: list[str]) -> None:
+        """根據狀態總線的變化，自動更新對應的 UI 狀態與畫面"""
+        if "levels" in changed_keys:
+            self._processed_distribution_pct = [0.0] * max(2, int(self.settings.levels))
+            self._raw_distribution_pct = [0.0] * max(2, int(self.settings.levels))
+            
+        if "compare_mode" in changed_keys:
+            self._compare_mode = self.settings.compare_mode
+            self._raw_frame = QPixmap()
+            if self._compare_mode:
+                self.resize(self.width() * 2, self.height())
+            else:
+                self.resize(max(300, self.width() // 2), self.height())
+            self._layout_overlay_buttons()
+            
+        if "compare_bw" in changed_keys:
+            self._raw_frame = QPixmap()
+            
+        if "process_order" in changed_keys:
+            self.image_mode.process_order = self.settings.process_order
+            
+        if "hotkey" in changed_keys:
+            self.hotkeys.register("toggle", self.settings.hotkey, self.toggle_enabled)
+
+        self._last_frame_signature = None
+        self.request_refresh(16)
 
     def on_settings_changed(
         self, levels: int, min_value: int, max_value: int, exp_value: float
@@ -482,16 +511,10 @@ class OverlayWindow(QMainWindow):
                 self._auto_balance_use_current = False
             
         self.store.update(levels=levels, min_value=min_value, max_value=max_value, exp_value=exp_value)
-        self._processed_distribution_pct = [0.0] * max(2, int(levels))
-        self._raw_distribution_pct = [0.0] * max(2, int(levels))
-        self._last_frame_signature = None
-        self.request_refresh(5)
 
     def on_display_settings_changed(self, min_value: int, max_value: int, exp_value: float) -> None:
         print(f"[DEBUG][User Action] 輸出顯示設定變更: 輸出下限={min_value}, 輸出上限={max_value}, 偏差={exp_value}")
         self.store.update(display_min_value=min_value, display_max_value=max_value, display_exp_value=exp_value)
-        self._last_frame_signature = None
-        self.request_refresh(16)
 
     def on_effect_settings_changed(
         self, blur_enabled: bool, blur_radius: int,
@@ -499,21 +522,14 @@ class OverlayWindow(QMainWindow):
     ) -> None:
         print(f"[DEBUG][User Action] 濾鏡設定變更: 模糊={blur_enabled}(半徑:{blur_radius}), 遞色={dither_enabled}(強度:{dither_strength})")
         self.store.update(blur_enabled=blur_enabled, blur_radius=blur_radius, dither_enabled=dither_enabled, dither_strength=dither_strength)
-        self._last_frame_signature = None
-        self.request_refresh(16)
 
     def on_order_changed(self, order: list[str]) -> None:
         print(f"[DEBUG][User Action] 處理管線順序變更: {order}")
         self.store.update(process_order=order)
-        self.image_mode.process_order = order
-        self._last_frame_signature = None
-        self.request_refresh(16)
 
     def on_morph_settings_changed(self, enabled: bool, strength: int, threshold: int = 35) -> None:
         print(f"[DEBUG][User Action] 形態學設定變更: 啟用={enabled}, 強度={strength}, 門檻={threshold}")
         self.store.update(morph_enabled=enabled, morph_strength=strength, morph_threshold=threshold)
-        self._last_frame_signature = None
-        self.request_refresh(16)
 
     def on_collapse_toggled(self, collapsed: bool) -> None:
         print(f"[DEBUG][User Action] 面板收合狀態變更: 收合={collapsed}")
@@ -528,24 +544,15 @@ class OverlayWindow(QMainWindow):
 
     def on_compare_mode_changed(self, enabled: bool) -> None:
         print(f"[DEBUG][User Action] 對照模式變更: 啟用={enabled}")
-        self._compare_mode = enabled
         self.store.update(compare_mode=enabled)
-        self._last_frame_signature = None
-        self._raw_frame = QPixmap()
-        self._layout_overlay_buttons()
-        self.request_refresh()
 
     def on_compare_bw_changed(self, bw_enabled: bool) -> None:
         print(f"[DEBUG][User Action] 對照圖黑白狀態變更: 啟用={bw_enabled}")
         self.store.update(compare_bw=bw_enabled)
-        self._last_frame_signature = None
-        self._raw_frame = QPixmap()
-        self.request_refresh()
 
     def on_hotkey_changed(self, hotkey: str) -> None:
         print(f"[DEBUG][User Action] 快捷鍵變更: {hotkey}")
         self.store.update(hotkey=hotkey)
-        self.hotkeys.register("toggle", hotkey, self.toggle_enabled)
 
     def _apply_balance_to_ui(self, lower: int, upper: int, exp_value: float) -> None:
         """統一將平衡參數套用到所有 UI 組件，不觸發循環信號。"""
@@ -712,6 +719,24 @@ class OverlayWindow(QMainWindow):
             lens.height(),
         )
 
+    def _update_canvas(self) -> None:
+        if hasattr(self, 'canvas'):
+            self.canvas.update_data(
+                lens_rect=self._lens_rect(),
+                compare_rect=self._compare_rect(),
+                frame=self._frame,
+                raw_frame=self._raw_frame,
+                compare_mode=self._compare_mode,
+                compare_gap=self._compare_gap,
+                show_distribution=self._show_distribution,
+                processed_distribution_pct=self._processed_distribution_pct,
+                raw_distribution_pct=self._raw_distribution_pct,
+                rect_compare_bw=self._rect_compare_bw,
+                compare_bw=self.settings.compare_bw,
+                rect_global_calc=self._rect_global_calc,
+                use_global_calc=self._use_global_calc
+            )
+
     def request_refresh(self, delay_ms: int = 33) -> None:
         if not self._coalesce_timer.isActive():
             self._coalesce_timer.start(delay_ms)
@@ -745,6 +770,8 @@ class OverlayWindow(QMainWindow):
             return None
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if hasattr(self, "timer"):
+            self.timer.stop()
         self._coalesce_timer.stop()
         if hasattr(self, "calc_worker"):
             self.calc_worker.stop()
@@ -878,7 +905,7 @@ class OverlayWindow(QMainWindow):
                 self._frame = QPixmap.fromImage(qimg)
                 self._processed_distribution_pct = [0.0] * max(2, int(self.settings.levels))
                 self._raw_distribution_pct = [0.0] * max(2, int(self.settings.levels))
-                self.update()
+                self._update_canvas()
                 self._is_refreshing = False
             else:
                 # 正常量化處理：丟進 QThread 背景計算
@@ -948,9 +975,7 @@ class OverlayWindow(QMainWindow):
             else:
                 self._raw_frame = QPixmap()
                 
-            self.update()
-            if hasattr(self, 'canvas'):
-                self.canvas.update()
+            self._update_canvas()
             t_rendered = time.perf_counter()
             
             # --- Profiling 測速節流輸出 ---

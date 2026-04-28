@@ -9,55 +9,70 @@ class RenderWidget(QWidget):
     獨立的渲染畫布 (Render Canvas)
     負責將處理後與原始的畫面渲染到畫面上，並繪製灰階比例等圖層。
     """
-    def __init__(self, parent) -> None:
+    def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._parent = parent
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.lens_rect = QRect()
+        self.compare_rect = QRect()
+        self.frame = QPixmap()
+        self.raw_frame = QPixmap()
+        self.compare_mode = False
+        self.compare_gap = 6
+        self.show_distribution = True
+        self.processed_distribution_pct = []
+        self.raw_distribution_pct = []
+        self.rect_compare_bw = QRect()
+        self.compare_bw = False
+        self.rect_global_calc = QRect()
+        self.use_global_calc = False
+
+    def update_data(self, **kwargs) -> None:
+        """更新渲染所需資料並觸發重繪"""
+        for k, v in kwargs.items():
+            if hasattr(self, k):
+                setattr(self, k, v)
+        self.update()
         
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         
-        # 取得視窗幾何資訊
-        lens = self._parent._lens_rect()
-        compare = self._parent._compare_rect()
-        
         painter.setClipRect(self.rect())
         
-        if self._parent._frame.isNull():
-            painter.fillRect(lens, Qt.GlobalColor.black)
+        if self.frame.isNull():
+            painter.fillRect(self.lens_rect, Qt.GlobalColor.black)
         else:
-            painter.drawPixmap(lens.topLeft(), self._parent._frame)
+            painter.drawPixmap(self.lens_rect.topLeft(), self.frame)
             
-        if self._parent._compare_mode and not compare.isNull():
-            if self._parent._raw_frame.isNull():
-                painter.fillRect(compare, Qt.GlobalColor.black)
+        if self.compare_mode and not self.compare_rect.isNull():
+            if self.raw_frame.isNull():
+                painter.fillRect(self.compare_rect, Qt.GlobalColor.black)
             else:
-                painter.drawPixmap(compare.topLeft(), self._parent._raw_frame)
+                painter.drawPixmap(self.compare_rect.topLeft(), self.raw_frame)
                 
             painter.setPen(Qt.GlobalColor.darkGray)
-            divider_x = lens.right() + (self._parent._compare_gap // 2) + 1
-            painter.drawLine(divider_x, lens.y(), divider_x, lens.bottom())
+            divider_x = self.lens_rect.right() + (self.compare_gap // 2) + 1
+            painter.drawLine(divider_x, self.lens_rect.y(), divider_x, self.lens_rect.bottom())
         
         # 繪製外框
         painter.setPen(QColor(100, 100, 100, 180))
         painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
         
         painter.setPen(Qt.GlobalColor.white)
-        painter.drawRect(lens.adjusted(0, 0, -1, -1))
+        painter.drawRect(self.lens_rect.adjusted(0, 0, -1, -1))
         
-        if self._parent._show_distribution:
-            self._draw_distribution_overlay(painter, lens, self._parent._processed_distribution_pct)
+        if self.show_distribution:
+            self._draw_distribution_overlay(painter, self.lens_rect, self.processed_distribution_pct)
             
-        if self._parent._compare_mode and not compare.isNull():
-            painter.drawRect(compare.adjusted(0, 0, -1, -1))
-            if self._parent._show_distribution:
-                self._draw_distribution_overlay(painter, compare, self._parent._raw_distribution_pct)
+        if self.compare_mode and not self.compare_rect.isNull():
+            painter.drawRect(self.compare_rect.adjusted(0, 0, -1, -1))
+            if self.show_distribution:
+                self._draw_distribution_overlay(painter, self.compare_rect, self.raw_distribution_pct)
                 
         # 繪製手動按鈕
-        if not self._parent._rect_compare_bw.isNull():
-            self._draw_manual_button(painter, self._parent._rect_compare_bw, "黑白", self._parent.settings.compare_bw)
-        if not self._parent._rect_global_calc.isNull():
-            self._draw_manual_button(painter, self._parent._rect_global_calc, "計算全圖", self._parent._use_global_calc)
+        if not self.rect_compare_bw.isNull():
+            self._draw_manual_button(painter, self.rect_compare_bw, "黑白", self.compare_bw)
+        if not self.rect_global_calc.isNull():
+            self._draw_manual_button(painter, self.rect_global_calc, "計算全圖", self.use_global_calc)
 
     def _draw_manual_button(self, painter: QPainter, rect: QRect, text: str, checked: bool) -> None:
         bg_color = QColor(46, 123, 246) if checked else QColor(0, 0, 0, 150)
@@ -68,6 +83,8 @@ class RenderWidget(QWidget):
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
     def _draw_distribution_overlay(self, painter: QPainter, rect: QRect, values: list[float]) -> None:
+        if not values:
+            return
         display_values = list(reversed(values))
         rows_count = max(1, len(display_values))
         row_h = 24
