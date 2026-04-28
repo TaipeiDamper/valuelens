@@ -131,11 +131,16 @@ def optimize_balance_params(
     guess_min = find_val(pct_black)
     guess_max = find_val(pct_not_white)
     
-    p_samples = np.linspace(-0.12, 0.12, 13) 
-    
+    # --- 方案 B: 自適應動態搜尋步長 (防止局部鞍點卡死) ---
+    if abs(current_max - current_min) < 25:
+        p_samples = np.linspace(-0.45, 0.45, 31) 
+        exp_range = np.linspace(-2.0, 2.0, 35)
+    else:
+        p_samples = np.linspace(-0.12, 0.12, 13) 
+        exp_range = np.linspace(-1.5, 1.5, 25)
+        
     lo_candidates = sorted(list(set([find_val(pct_black + s) for s in p_samples] + [guess_min])))
     hi_candidates = sorted(list(set([find_val(pct_not_white + s) for s in p_samples] + [guess_max])))
-    exp_range = np.linspace(-1.5, 1.5, 25)
 
     best_loss = float('inf')
     best_params = (current_min, current_max, current_exp)

@@ -387,6 +387,7 @@ class OverlayWindow(QMainWindow):
 
     def import_image(self, bgr_image: np.ndarray) -> None:
         """匯入外部圖片，進入 StaticMode (Image 類型)。"""
+        print(f"[DEBUG][User Action] 匯入靜態圖片, 大小={bgr_image.shape}")
         self._source_image = bgr_image.copy()
         self._full_image_gray = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY)
         self._is_static_mode = True
@@ -411,6 +412,7 @@ class OverlayWindow(QMainWindow):
 
     def open_image_mode(self) -> None:
         """開啟檔案選擇器匯入圖片。"""
+        print(f"[DEBUG][User Action] 開啟圖片檔案選擇器")
         from PySide6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getOpenFileName(
             self, "選擇圖片", "", "Images (*.png *.jpg *.jpeg *.bmp *.webp)"
@@ -446,6 +448,7 @@ class OverlayWindow(QMainWindow):
     def on_settings_changed(
         self, levels: int, min_value: int, max_value: int, exp_value: float
     ) -> None:
+        print(f"[DEBUG][User Action] 色階設定變更: 階層={levels}, 輸入下限={min_value}, 輸入上限={max_value}, 偏差={exp_value}")
         if self.settings.levels != levels:
             old_lvl = self.settings.levels
             new_lvl = levels
@@ -485,6 +488,7 @@ class OverlayWindow(QMainWindow):
         self.request_refresh(5)
 
     def on_display_settings_changed(self, min_value: int, max_value: int, exp_value: float) -> None:
+        print(f"[DEBUG][User Action] 輸出顯示設定變更: 輸出下限={min_value}, 輸出上限={max_value}, 偏差={exp_value}")
         self.store.update(display_min_value=min_value, display_max_value=max_value, display_exp_value=exp_value)
         self._last_frame_signature = None
         self.request_refresh(16)
@@ -493,22 +497,26 @@ class OverlayWindow(QMainWindow):
         self, blur_enabled: bool, blur_radius: int,
         dither_enabled: bool, dither_strength: int
     ) -> None:
+        print(f"[DEBUG][User Action] 濾鏡設定變更: 模糊={blur_enabled}(半徑:{blur_radius}), 遞色={dither_enabled}(強度:{dither_strength})")
         self.store.update(blur_enabled=blur_enabled, blur_radius=blur_radius, dither_enabled=dither_enabled, dither_strength=dither_strength)
         self._last_frame_signature = None
         self.request_refresh(16)
 
     def on_order_changed(self, order: list[str]) -> None:
+        print(f"[DEBUG][User Action] 處理管線順序變更: {order}")
         self.store.update(process_order=order)
         self.image_mode.process_order = order
         self._last_frame_signature = None
         self.request_refresh(16)
 
     def on_morph_settings_changed(self, enabled: bool, strength: int, threshold: int = 35) -> None:
+        print(f"[DEBUG][User Action] 形態學設定變更: 啟用={enabled}, 強度={strength}, 門檻={threshold}")
         self.store.update(morph_enabled=enabled, morph_strength=strength, morph_threshold=threshold)
         self._last_frame_signature = None
         self.request_refresh(16)
 
     def on_collapse_toggled(self, collapsed: bool) -> None:
+        print(f"[DEBUG][User Action] 面板收合狀態變更: 收合={collapsed}")
         self._panel_height = 36 if collapsed else 200
         self._layout_panel()
         
@@ -519,6 +527,7 @@ class OverlayWindow(QMainWindow):
         self.request_refresh(10)
 
     def on_compare_mode_changed(self, enabled: bool) -> None:
+        print(f"[DEBUG][User Action] 對照模式變更: 啟用={enabled}")
         self._compare_mode = enabled
         self.store.update(compare_mode=enabled)
         self._last_frame_signature = None
@@ -527,12 +536,14 @@ class OverlayWindow(QMainWindow):
         self.request_refresh()
 
     def on_compare_bw_changed(self, bw_enabled: bool) -> None:
+        print(f"[DEBUG][User Action] 對照圖黑白狀態變更: 啟用={bw_enabled}")
         self.store.update(compare_bw=bw_enabled)
         self._last_frame_signature = None
         self._raw_frame = QPixmap()
         self.request_refresh()
 
     def on_hotkey_changed(self, hotkey: str) -> None:
+        print(f"[DEBUG][User Action] 快捷鍵變更: {hotkey}")
         self.store.update(hotkey=hotkey)
         self.hotkeys.register("toggle", hotkey, self.toggle_enabled)
 
@@ -593,6 +604,7 @@ class OverlayWindow(QMainWindow):
 
     def on_auto_continuous_toggled(self, enabled: bool) -> None:
         """切換持續自動平衡。"""
+        print(f"[DEBUG][User Action] 持續自動平衡變更: 啟用={enabled}")
         self._auto_continuous_enabled = enabled
         self._auto_balance_pending = False # 清除任何待處理的平衡請求
         if enabled:
@@ -602,11 +614,13 @@ class OverlayWindow(QMainWindow):
 
     def on_edge_settings_changed(self, enabled: bool, strength: int, mix: int) -> None:
         """邊緣檢測設定變更。"""
+        print(f"[DEBUG][User Action] 邊緣檢測變更: 啟用={enabled}, 強度={strength}, 混合度={mix}")
         self.store.update(edge_enabled=enabled, edge_strength=strength, edge_mix=mix)
         self._last_frame_signature = None
         self.request_refresh(16)
 
     def on_auto_balance_raw_requested(self) -> None:
+        print(f"[DEBUG][User Action] 請求自動平衡 (根據目前畫面)")
         # 點擊重新平衡時，關閉持續模式
         if self._auto_continuous_enabled:
             self._auto_continuous_enabled = False
