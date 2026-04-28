@@ -18,10 +18,10 @@ from valuelens.core.capture_service import CaptureService
 from valuelens.core.hotkey_service import HotkeyService
 from valuelens.core.qt_image import bgr_to_qimage, gray_to_qimage, qimage_to_bgr
 from valuelens.core.quantize import native_distribution_from_indices, quantize_gray, quantize_gray_with_indices
+from valuelens.core.engine import ImageProcessWorker
 from valuelens.modes.image_mode import ImageModeDialog
 from valuelens.ui.control_panel import ControlPanel
 from valuelens.ui.mirror_window import MirrorWindow
-
 
 _RESIZE_MARGIN = 12
 _MIN_WIDTH = 320
@@ -31,63 +31,6 @@ _EDGE_LEFT = 1
 _EDGE_RIGHT = 2
 _EDGE_TOP = 4
 _EDGE_BOTTOM = 8
-
-
-class ImageProcessWorker(QThread):
-    """背景影像處理運算執行緒，負責執行耗時的 quantize_gray_with_indices。"""
-    # finished 信號：帶回 logic_quantized, logic_indices, edges, t_computed
-    finished = Signal(np.ndarray, np.ndarray, object, float)
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self._busy = False
-        self._pending_task = None
-
-    def is_busy(self) -> bool:
-        return self._busy
-
-    def process_frame(self, frame: np.ndarray, settings: AppSettings) -> None:
-        """排程一個運算任務，若目前在忙則直接覆蓋暫存任務(永遠只算最新的一張)。"""
-        self._pending_task = (frame, settings)
-        if not self.isRunning():
-            self.start()
-
-    def run(self) -> None:
-        while self._pending_task is not None:
-            self._busy = True
-            frame, settings = self._pending_task
-            self._pending_task = None
-            
-            t_start = time.perf_counter()
-            
-            eff_blur = settings.blur_radius if settings.blur_enabled else 0
-            eff_dither = settings.dither_strength if settings.dither_enabled else 0
-            eff_edge = settings.edge_strength if settings.edge_enabled else 0
-            
-            logic_quantized, logic_indices, edges = quantize_gray_with_indices(
-                frame,
-                settings.levels,
-                settings.min_value,
-                settings.max_value,
-                settings.exp_value,
-                display_min=settings.display_min_value,
-                display_max=settings.display_max_value,
-                display_exp=settings.display_exp_value,
-                blur_radius=eff_blur,
-                dither_strength=eff_dither,
-                edge_strength=eff_edge,
-                process_order=settings.process_order,
-                morph_enabled=settings.morph_enabled,
-                morph_strength=settings.morph_strength,
-                morph_threshold=settings.morph_threshold,
-            )
-            t_computed = time.perf_counter() - t_start
-            
-            self.finished.emit(logic_quantized, logic_indices, edges, t_computed)
-            
-        self._busy = False
-
-
 
 class _RECT(ctypes.Structure):
     _fields_ = [
@@ -113,20 +56,7 @@ class OverlayWindow(QMainWindow):
         
         self.calc_worker = ImageProcessWorker(self)
         self.calc_worker.finished.connect(self._on_calc_finished)
-        self.image_mode = ImageModeDialog(
-            levels=settings.levels,
-            min_value=settings.min_value,
-            max_value=settings.max_value,
-            exp_value=settings.exp_value,
-            blur_enabled=settings.blur_enabled,
-            blur_radius=settings.blur_radius,
-            dither_enabled=settings.dither_enabled,
-            dither_strength=settings.dither_strength,
-            process_order=settings.process_order,
-            morph_enabled=settings.morph_enabled,
-            morph_strength=settings.morph_strength,
-            parent=self,
-        )
+        self.image_mode = ImageModeDialog(settings=self.settings, parent=self)
         self.image_mode.set_import_callback(self._get_current_raw_frame)
 
         self.setGeometry(settings.x, settings.y, settings.width, settings.height)
@@ -473,22 +403,6 @@ class OverlayWindow(QMainWindow):
         self.refresh_frame()
         self.update()
 
-    def _sync_image_mode_settings(self) -> None:
-        self.image_mode.set_quantize_settings(
-            self.settings.levels,
-            self.settings.min_value,
-            self.settings.max_value,
-            self.settings.exp_value,
-            self.settings.blur_enabled,
-            self.settings.blur_radius,
-            self.settings.dither_enabled,
-            self.settings.dither_strength,
-            self.settings.process_order,
-            self.settings.morph_enabled,
-            self.settings.morph_strength,
-            self.settings.morph_threshold,
-        )
-
     def open_image_mode(self) -> None:
         """開啟檔案選擇器匯入圖片。"""
         from PySide6.QtWidgets import QFileDialog
@@ -562,7 +476,6 @@ class OverlayWindow(QMainWindow):
         self.settings.min_value = min_value
         self.settings.max_value = max_value
         self.settings.exp_value = exp_value
-        self._sync_image_mode_settings()
         self._processed_distribution_pct = [0.0] * max(2, int(levels))
         self._raw_distribution_pct = [0.0] * max(2, int(levels))
         self._last_frame_signature = None
@@ -583,8 +496,6 @@ class OverlayWindow(QMainWindow):
         self.settings.blur_radius = blur_radius
         self.settings.dither_enabled = dither_enabled
         self.settings.dither_strength = dither_strength
-        # Update image mode if active
-        self._sync_image_mode_settings()
         self._last_frame_signature = None
         self.request_refresh(16)
 
@@ -598,7 +509,6 @@ class OverlayWindow(QMainWindow):
         self.settings.morph_enabled = enabled
         self.settings.morph_strength = strength
         self.settings.morph_threshold = threshold
-        self._sync_image_mode_settings()
         self._last_frame_signature = None
         self.request_refresh(16)
 
@@ -645,8 +555,6 @@ class OverlayWindow(QMainWindow):
         self.settings.min_value = lower
         self.settings.max_value = upper
         self.settings.exp_value = exp_value
-        self._sync_image_mode_settings()
-
     def on_auto_balance_target_requested(self, ratios: tuple[float, float, float]) -> None:
         # 決定計算來源：是當前可見的 viewport 還是整張圖片
         source_gray = self._last_gray_frame

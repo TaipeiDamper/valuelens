@@ -19,33 +19,18 @@ from PySide6.QtWidgets import (
 from valuelens.core.quantize import quantize_gray
 from valuelens.core.qt_image import bgr_to_qpixmap, qimage_to_bgr
 
+from valuelens.core.engine import ImageProcessWorker
+from valuelens.config.settings import AppSettings
 
 class ImageModeDialog(QDialog):
-    def __init__(
-        self, levels: int, min_value: int, max_value: int, exp_value: float,
-        blur_enabled: bool = False, blur_radius: int = 0,
-        dither_enabled: bool = False, dither_strength: int = 0,
-        process_order: list[str] = ("blur", "dither", "edge", "morph"),
-        morph_enabled: bool = False, morph_strength: int = 1,
-        morph_threshold: int = 35,
-        parent=None
-    ) -> None:
+    def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("ValueLens - 圖片模式")
         self.resize(900, 600)
 
-        self.levels = levels
-        self.min_value = min_value
-        self.max_value = max_value
-        self.exp_value = exp_value
-        self.blur_enabled = blur_enabled
-        self.blur_radius = blur_radius
-        self.dither_enabled = dither_enabled
-        self.dither_strength = dither_strength
-        self.process_order = list(process_order)
-        self.morph_enabled = morph_enabled
-        self.morph_strength = morph_strength
-        self.morph_threshold = morph_threshold
+        self.settings = settings
+        self.worker = ImageProcessWorker(self)
+        self.worker.finished.connect(self._on_calc_finished)
 
         self._source: Optional[np.ndarray] = None
         self._result: Optional[np.ndarray] = None
@@ -86,27 +71,6 @@ class ImageModeDialog(QDialog):
 
     def set_import_callback(self, callback) -> None:
         self._import_callback = callback
-
-    def set_quantize_settings(
-        self, levels: int, min_value: int, max_value: int, exp_value: float,
-        blur_enabled: bool = False, blur_radius: int = 0,
-        dither_enabled: bool = False, dither_strength: int = 0,
-        process_order: list[str] = ("blur", "dither", "edge", "morph"),
-        morph_enabled: bool = False, morph_strength: int = 1,
-        morph_threshold: int = 35,
-    ) -> None:
-        self.levels = levels
-        self.min_value = min_value
-        self.max_value = max_value
-        self.exp_value = exp_value
-        self.blur_enabled = blur_enabled
-        self.blur_radius = blur_radius
-        self.dither_enabled = dither_enabled
-        self.dither_strength = dither_strength
-        self.process_order = list(process_order)
-        self.morph_enabled = morph_enabled
-        self.morph_strength = morph_strength
-        self.morph_threshold = morph_threshold
 
     def open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -157,18 +121,29 @@ class ImageModeDialog(QDialog):
             QMessageBox.information(self, "提示", "請先開啟或貼上圖片")
             return
         
-        eff_blur = self.blur_radius if self.blur_enabled else 0
-        eff_dither = self.dither_strength if self.dither_enabled else 0
+        self.apply_btn.setText("計算中...")
+        self.apply_btn.setEnabled(False)
+        self.worker.process_frame(self._source.copy(), self.settings)
+
+    def _on_calc_finished(self, logic_quantized: np.ndarray, logic_indices: np.ndarray, edges: object, t_computed: float) -> None:
+        self.apply_btn.setText("套用目前參數")
+        self.apply_btn.setEnabled(True)
         
-        self._result = quantize_gray(
-            self._source, self.levels, self.min_value, self.max_value, self.exp_value,
-            blur_radius=eff_blur,
-            dither_strength=eff_dither,
-            process_order=self.process_order,
-            morph_enabled=self.morph_enabled,
-            morph_strength=self.morph_strength,
-            morph_threshold=self.morph_threshold
-        )
+        if edges is not None:
+            mix = self.settings.edge_mix / 100.0
+            ec = self.settings.edge_color[::-1] # RGB -> BGR
+            base_bgr = cv2.cvtColor(logic_quantized, cv2.COLOR_GRAY2BGR)
+            if mix >= 1.0:
+                final_bgr = np.full_like(base_bgr, 255)
+                final_bgr[edges > 0] = ec
+            else:
+                bg_part = (base_bgr.astype(np.float32) * (1.0 - mix) + 255.0 * mix).astype(np.uint8)
+                final_bgr = bg_part
+                final_bgr[edges > 0] = ec
+            self._result = final_bgr
+        else:
+            self._result = cv2.cvtColor(logic_quantized, cv2.COLOR_GRAY2BGR)
+
         self.preview.setPixmap(bgr_to_qpixmap(self._result).scaled(
             self.preview.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
