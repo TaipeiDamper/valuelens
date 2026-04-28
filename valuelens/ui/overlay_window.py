@@ -770,6 +770,7 @@ class OverlayWindow(QMainWindow):
         self._stable_frame_count += 1
         self._is_refreshing = True
         try:
+            t_start = time.perf_counter()
             # 1. 座標與參數準備
             rect = self._lens_rect()
             if rect.width() <= 0 or rect.height() <= 0: return
@@ -855,6 +856,7 @@ class OverlayWindow(QMainWindow):
                 )
                 if frame is not None:
                     self._last_raw_bgr_frame = frame.copy()
+                t_captured = time.perf_counter()
             
             if frame is None or frame.size == 0: 
                 return
@@ -899,6 +901,7 @@ class OverlayWindow(QMainWindow):
                     morph_enabled=self.settings.morph_enabled,
                     morph_strength=self.settings.morph_strength,
                 )
+                t_computed = time.perf_counter()
                 
                 h, w = logic_quantized.shape[:2]
                 
@@ -947,6 +950,31 @@ class OverlayWindow(QMainWindow):
                 self._raw_frame = QPixmap()
             
             self.update()
+            t_rendered = time.perf_counter()
+            
+            # --- Profiling 測速節流輸出 ---
+            PROFILING = True  # <<-- 檢修時開啟，關閉改為 False
+            if PROFILING:
+                if not hasattr(self, '_last_profile_ts'):
+                    self._last_profile_ts = 0.0
+                now_ts = time.monotonic()
+                if now_ts - self._last_profile_ts > 0.33:
+                    self._last_profile_ts = now_ts
+                    c_cap = (t_captured - t_start) * 1000
+                    c_comp = (t_computed - t_captured) * 1000
+                    c_ui = (t_rendered - t_computed) * 1000
+                    c_total = (t_rendered - t_start) * 1000
+                    
+                    s = self.settings
+                    lvl = s.levels
+                    b_on = "B" if (s.blur_enabled and s.blur_radius > 0) else "-"
+                    d_on = "D" if (s.dither_enabled and s.dither_strength > 0) else "-"
+                    e_on = "E" if (s.edge_enabled and s.edge_strength > 0) else "-"
+                    m_on = "M" if (s.morph_enabled and s.morph_strength > 0) else "-"
+                    comp_on = "C" if self._compare_mode else "-"
+                    
+                    state_str = f"[Lv:{lvl} {b_on}{d_on}{e_on}{m_on}{comp_on}]"
+                    print(f"[Profiling]{state_str} 擷取:{c_cap:5.1f}ms | 運算:{c_comp:5.1f}ms | 渲染:{c_ui:5.1f}ms | 總計:{c_total:5.1f}ms")
 
             # 自動平衡邏輯
             if self._auto_balance_pending:

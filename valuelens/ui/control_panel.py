@@ -622,17 +622,9 @@ class ControlPanel(QWidget):
             # 限制選單名稱長度
             display_name = (raw_name[:15] + "...") if len(raw_name) > 15 else raw_name
             
+            slot_menu = QMenu(f"{i+1:02d}. {display_name}", self)
             if is_empty:
-                slot_menu = QMenu(f"{i+1:02d}. [空] {display_name}", self)
-                slot_menu.setStyleSheet("""
-                    QMenu::item { color: #222; }
-                    QMenu::item:disabled { color: #aaa; }
-                """)
-            else:
-                slot_menu = QMenu(f"{i+1:02d}. {display_name}", self)
-                slot_menu.setStyleSheet("""
-                    QMenu::item { color: #222; }
-                """)
+                slot_menu.setStyleSheet("color: #777;")
             
             load_act = QAction("讀取 (Load)", self)
             load_act.setEnabled(not is_empty)
@@ -991,7 +983,5 @@ class DraggableOrderWidget(QWidget):
             self._states[key] = new_state
             self.toggle_requested.emit(key, new_state)
             
-        self._active_idx = -1
-        self.update()
         self._active_idx = -1
         self.update()

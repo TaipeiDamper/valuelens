@@ -56,11 +56,21 @@ def apply_bilateral(gray: np.ndarray, radius: int = 5) -> np.ndarray:
     if radius <= 0:
         return gray
     d = radius * 2 + 1
-    if radius > 15:
-        h, w = gray.shape
-        small = cv2.resize(gray, (w // 2, h // 2), interpolation=cv2.INTER_LINEAR)
-        filtered = cv2.bilateralFilter(small, d // 2 + 1, 75, 75)
+    h, w = gray.shape
+    
+    # 鎖定最大運算寬度為 400 像素，徹底擺脫解析度造成的效能懲罰
+    target_w = 400
+    if w > target_w:
+        scale = target_w / w
+        target_h = max(1, int(h * scale))
+        
+        # 為了讓模糊視覺體驗一致，濾波半徑 d 也需要隨比例縮放
+        d_small = max(3, int(d * scale))
+        
+        small = cv2.resize(gray, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        filtered = cv2.bilateralFilter(small, d_small, 75, 75)
         return cv2.resize(filtered, (w, h), interpolation=cv2.INTER_LINEAR)
+        
     return cv2.bilateralFilter(gray, d, 75, 75)
 
 def apply_ordered_dither(gray: np.ndarray) -> np.ndarray:
