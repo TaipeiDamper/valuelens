@@ -45,10 +45,12 @@ def get_bayer_tiled(h: int, w: int) -> np.ndarray:
         [12, 4, 14, 6],
         [3, 11, 1, 9],
         [15, 7, 13, 5]
-    ], dtype=np.float32)
-    bayer = (bayer + 0.5) * (255.0 / 16.0) - 128.0
+    ], dtype=np.int16)
     
-    tiled = np.tile(bayer, (h // 4 + 1, w // 4 + 1))[:h, :w]
+    # 將浮點計算 (bayer + 0.5) * (255/32) - 64 預先轉為 Int16
+    bayer_int = np.round((bayer + 0.5) * (255.0 / 32.0) - 64.0).astype(np.int16)
+    
+    tiled = np.tile(bayer_int, (h // 4 + 1, w // 4 + 1))[:h, :w]
     _BAYER_CACHE[key] = tiled
     return tiled
 
@@ -76,7 +78,9 @@ def apply_bilateral(gray: np.ndarray, radius: int = 5) -> np.ndarray:
 def apply_ordered_dither(gray: np.ndarray) -> np.ndarray:
     h, w = gray.shape
     bayer_tiled = get_bayer_tiled(h, w)
-    res = gray.astype(np.float32) + (bayer_tiled * 0.5)
+    
+    # 採用快速的 Int16 向量運算取代耗能的 Float32
+    res = gray.astype(np.int16) + bayer_tiled
     return np.clip(res, 0, 255).astype(np.uint8)
 
 

@@ -67,8 +67,15 @@ class OverlayWindow(QMainWindow):
         self.auto_balance_worker = AutoBalanceWorker(self)
         self.auto_balance_worker.finished.connect(self._on_auto_balance_finished)
         
-        # 初始化井字網格背景檢測器，預設門檻值設為 20.0
+        # 初始化三層架構防線：
+        # 1. 稀疏網格 (Sparse: grid_count=2) 用於背景大幅更換檢測
         self.scene_detector = GridSceneDetector(threshold=20.0, grid_count=2)
+        # 2. 稠密網格 (Dense: grid_count=6) 用於常規自動採樣 (比例 25)
+        self.dense_detector = GridSceneDetector(threshold=20.0, grid_count=6)
+        # 3. 極稠密網格 (Super Dense: grid_count=12) 用於低頻兜底校正 (比例 100)
+        self.super_dense_detector = GridSceneDetector(threshold=20.0, grid_count=12)
+        # 校準循環計數器
+        self._auto_eval_cycle = 0
         
         self.image_mode = ImageModeDialog(settings=self.settings, parent=self)
         self.image_mode.set_import_callback(self._get_current_raw_frame)
@@ -569,9 +576,13 @@ class OverlayWindow(QMainWindow):
         if source_gray is None or source_gray.size == 0:
             return
             
-        # 自動模式下，使用井字網格像素點進行快速尋優
+        # 自動模式下實施 3 層混合校正架構 (100 -> 25 -> 25 -> 25 -> 100)
         if self._auto_continuous_enabled:
-            eval_data = self.scene_detector.extract_grid_pixels(source_gray)
+            self._auto_eval_cycle = (self._auto_eval_cycle + 1) % 4
+            if self._auto_eval_cycle == 0:
+                eval_data = self.super_dense_detector.extract_grid_pixels(source_gray)  # 極稠密網格兜底校正
+            else:
+                eval_data = self.dense_detector.extract_grid_pixels(source_gray)  # 稠密採樣
         else:
             eval_data = source_gray
             
@@ -1012,9 +1023,9 @@ class OverlayWindow(QMainWindow):
         from valuelens.core.balance import calc_level_distribution, calc_indices_distribution
         level_count = max(2, int(self.settings.levels))
         
-        # 自動模式下白灰黑比例統計僅使用網格線抽樣
+        # 自動模式下白灰黑比例統計採用代表性更高的「稠密網格」抽樣
         if self._auto_continuous_enabled and raw_gray is not None:
-            eval_data = self.scene_detector.extract_grid_pixels(raw_gray)
+            eval_data = self.dense_detector.extract_grid_pixels(raw_gray)
             self._raw_distribution_pct = calc_level_distribution(eval_data, level_count)
         else:
             self._raw_distribution_pct = calc_level_distribution(raw_gray, level_count)
