@@ -8,7 +8,7 @@
 ⏳ [階段二] 建立全域非同步引擎 (下一步)
 即將進行：把 overlay_window.py 裡的 ImageProcessWorker 獨立出來變成 valuelens/core/engine.py。
 效益：讓未來所有的視窗或輸出功能，都能直接呼叫它來算圖，不會卡死主畫面。
-⏳ [階段三] 圖片模式 (ImageMode) 現代化
+✅ [階段三] 圖片模式 (ImageMode) 現代化 (已完成)
 即將進行：翻新 valuelens/modes/image_mode.py。把它老舊的「同步算圖」改接上 [階段二] 的引擎，並且引入您最新的 Edge 參數。
 效益：處理再大張的圖片，視窗也不會凍結當機了。
 ⏳ [階段四] 全域狀態總線 (State Store)
@@ -24,8 +24,8 @@
 #### 🔴 高優先級 (High Priority)
 - [x] **優化核心演算法以跨越鞍點**：方案 B 已實作。
 - [x] **防止持續平衡的畫面震盪**：設計臨界點保護，避免色調在特定灰階分佈時，參數激烈跳動造成畫面閃爍。
-- [ ] **UI 算圖效能與大圖卡頓排查**：評估 CPU 負責的 `QPixmap.fromImage` 負擔，在 4K 環境下考慮引入硬體加速或更極致的快取機制。
+- [x] **UI 算圖效能與大圖卡頓排查**：已修正 Profiling 測速公式，排除了背景 Queue 造成的「偽高延遲」錯覺，並確認目前 `QPixmap` 在 CPU 上的效能負荷在正常範圍內。
 
 #### 🟡 中優先級 (Medium Priority)
 - [x] **修正背景線程在退出時的殘留**：已於 `engine.py` 實作 `stop()` 機制，並安全介入 `OverlayWindow.closeEvent`。
-- [ ] **滑鼠穿透與點擊事件委派安全化**：確認 `RenderWidget` 在全畫面疊加狀態下，與父級視窗的滑鼠監聽事件（例如未來開發 Lens 互動操作時）能正確傳遞。
+- [x] **滑鼠穿透與點擊事件委派安全化**：已於 `RenderWidget` 設定 `WA_TransparentForMouseEvents=True`，徹底確保全畫面疊加時事件能安全穿透至 `OverlayWindow`。

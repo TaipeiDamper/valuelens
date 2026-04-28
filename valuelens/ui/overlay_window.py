@@ -583,10 +583,10 @@ class OverlayWindow(QMainWindow):
             return old + step
 
         if self._auto_continuous_enabled:
-            # 持續模式下使用平滑與最大步長限制，讓漸變更自然
-            lower = int(round(smooth_and_clamp(lower, self.settings.min_value, 0.4, max_step=10)))
-            upper = int(round(smooth_and_clamp(upper, self.settings.max_value, 0.4, max_step=10)))
-            exp_value = smooth_and_clamp(exp_value, self.settings.exp_value, 0.3, max_step=0.2)
+            # 持續模式下使用平滑，放寬最大步長避免手感 Lag，利用 hysteresis 防震盪即可
+            lower = int(round(smooth_and_clamp(lower, self.settings.min_value, 0.5, max_step=30)))
+            upper = int(round(smooth_and_clamp(upper, self.settings.max_value, 0.5, max_step=30)))
+            exp_value = smooth_and_clamp(exp_value, self.settings.exp_value, 0.4, max_step=0.5)
         
         changed = (
             abs(lower - self.settings.min_value) >= 1 or
@@ -765,6 +765,8 @@ class OverlayWindow(QMainWindow):
         self._coalesce_timer.stop()
         if hasattr(self, "calc_worker"):
             self.calc_worker.stop()
+        if hasattr(self, "image_mode") and self.image_mode is not None:
+            self.image_mode.close()
         if getattr(self, "_mirror_window", None) is not None:
             self._mirror_window.close()
         if hasattr(self, "hotkeys"):
@@ -846,6 +848,7 @@ class OverlayWindow(QMainWindow):
 
     def _on_calc_finished(self, logic_quantized: np.ndarray, logic_indices: np.ndarray, edges: np.ndarray | None, t_computed: float) -> None:
         try:
+            ui_start_time = time.perf_counter()
             if not hasattr(self, '_last_calc_frame') or self._last_calc_frame is None:
                 return
                 
@@ -899,7 +902,7 @@ class OverlayWindow(QMainWindow):
                 self._raw_frame = QPixmap()
                 
             self._update_canvas()
-            t_rendered = time.perf_counter()
+            ui_end_time = time.perf_counter()
             
             # --- Profiling 測速節流輸出 ---
             PROFILING = True
@@ -911,8 +914,8 @@ class OverlayWindow(QMainWindow):
                     self._last_profile_ts = now_ts
                     c_cap = (t_captured - t_start) * 1000
                     c_comp = t_computed * 1000
-                    c_ui = (t_rendered - (t_captured + t_computed)) * 1000
-                    c_total = (t_rendered - t_start) * 1000
+                    c_ui = (ui_end_time - ui_start_time) * 1000
+                    c_total = (ui_end_time - t_start) * 1000
                     
                     s = self.settings
                     lvl = s.levels

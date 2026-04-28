@@ -11,7 +11,7 @@ class RenderWidget(QWidget):
     """
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.lens_rect = QRect()
         self.compare_rect = QRect()
         self.frame = QPixmap()

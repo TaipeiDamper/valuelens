@@ -72,6 +72,11 @@ class ImageModeDialog(QDialog):
     def set_import_callback(self, callback) -> None:
         self._import_callback = callback
 
+    def closeEvent(self, event) -> None:
+        if hasattr(self, "worker"):
+            self.worker.stop()
+        event.accept()
+
     def open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "選擇圖片", "", "Images (*.png *.jpg *.jpeg *.bmp *.webp)"
