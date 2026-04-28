@@ -9,7 +9,7 @@ from ctypes import wintypes
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QPoint, QRect, Qt, QTimer
+from PySide6.QtCore import QPoint, QRect, Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QCloseEvent, QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QMainWindow, QToolButton
 
@@ -31,6 +31,61 @@ _EDGE_LEFT = 1
 _EDGE_RIGHT = 2
 _EDGE_TOP = 4
 _EDGE_BOTTOM = 8
+
+
+class ImageProcessWorker(QThread):
+    """背景影像處理運算執行緒，負責執行耗時的 quantize_gray_with_indices。"""
+    # finished 信號：帶回 logic_quantized, logic_indices, edges, t_computed
+    finished = Signal(np.ndarray, np.ndarray, object, float)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._busy = False
+        self._pending_task = None
+
+    def is_busy(self) -> bool:
+        return self._busy
+
+    def process_frame(self, frame: np.ndarray, settings: AppSettings) -> None:
+        """排程一個運算任務，若目前在忙則直接覆蓋暫存任務(永遠只算最新的一張)。"""
+        self._pending_task = (frame, settings)
+        if not self.isRunning():
+            self.start()
+
+    def run(self) -> None:
+        while self._pending_task is not None:
+            self._busy = True
+            frame, settings = self._pending_task
+            self._pending_task = None
+            
+            t_start = time.perf_counter()
+            
+            eff_blur = settings.blur_radius if settings.blur_enabled else 0
+            eff_dither = settings.dither_strength if settings.dither_enabled else 0
+            eff_edge = settings.edge_strength if settings.edge_enabled else 0
+            
+            logic_quantized, logic_indices, edges = quantize_gray_with_indices(
+                frame,
+                settings.levels,
+                settings.min_value,
+                settings.max_value,
+                settings.exp_value,
+                display_min=settings.display_min_value,
+                display_max=settings.display_max_value,
+                display_exp=settings.display_exp_value,
+                blur_radius=eff_blur,
+                dither_strength=eff_dither,
+                edge_strength=eff_edge,
+                process_order=settings.process_order,
+                morph_enabled=settings.morph_enabled,
+                morph_strength=settings.morph_strength,
+                morph_threshold=settings.morph_threshold,
+            )
+            t_computed = time.perf_counter() - t_start
+            
+            self.finished.emit(logic_quantized, logic_indices, edges, t_computed)
+            
+        self._busy = False
 
 
 
@@ -55,6 +110,9 @@ class OverlayWindow(QMainWindow):
 
         self.capture = CaptureService()
         self.hotkeys = HotkeyService()
+        
+        self.calc_worker = ImageProcessWorker(self)
+        self.calc_worker.finished.connect(self._on_calc_finished)
         self.image_mode = ImageModeDialog(
             levels=settings.levels,
             min_value=settings.min_value,
@@ -756,6 +814,13 @@ class OverlayWindow(QMainWindow):
         except Exception:
             return None
 
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self._coalesce_timer.stop()
+        if hasattr(self, "calc_worker") and self.calc_worker.isRunning():
+            self.calc_worker.quit()
+            self.calc_worker.wait()
+        event.accept()
+
     def refresh_frame(self) -> None:
         """核心影像處理管線。"""
         if self._is_refreshing:
@@ -861,6 +926,7 @@ class OverlayWindow(QMainWindow):
                 t_captured = time.perf_counter()
             
             if frame is None or frame.size == 0: 
+                self._is_refreshing = False
                 return
 
             self._last_gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -868,6 +934,7 @@ class OverlayWindow(QMainWindow):
             # 特徵檢查
             signature = self._frame_signature(frame)
             if signature == self._last_frame_signature and not self._frame.isNull():
+                self._is_refreshing = False
                 return
             self._last_frame_signature = signature
 
@@ -881,62 +948,61 @@ class OverlayWindow(QMainWindow):
                 self._frame = QPixmap.fromImage(qimg)
                 self._processed_distribution_pct = [0.0] * max(2, int(self.settings.levels))
                 self._raw_distribution_pct = [0.0] * max(2, int(self.settings.levels))
+                self.update()
+                self._is_refreshing = False
             else:
-                # 正常量化處理
-                eff_blur = self.settings.blur_radius if self.settings.blur_enabled else 0
-                eff_dither = self.settings.dither_strength if self.settings.dither_enabled else 0
-                eff_edge = self.settings.edge_strength if self.settings.edge_enabled else 0
+                # 正常量化處理：丟進 QThread 背景計算
+                self.calc_worker.process_frame(frame.copy(), self.settings)
                 
-                logic_quantized, logic_indices, edges = quantize_gray_with_indices(
-                    frame,
-                    self.settings.levels,
-                    self.settings.min_value,
-                    self.settings.max_value,
-                    self.settings.exp_value,
-                    display_min=self.settings.display_min_value,
-                    display_max=self.settings.display_max_value,
-                    display_exp=self.settings.display_exp_value,
-                    blur_radius=eff_blur,
-                    dither_strength=eff_dither,
-                    edge_strength=eff_edge,
-                    process_order=self.settings.process_order,
-                    morph_enabled=self.settings.morph_enabled,
-                    morph_strength=self.settings.morph_strength,
-                    morph_threshold=self.settings.morph_threshold,
-                )
-                t_computed = time.perf_counter()
+                # 暫存執行緒運算當下的關鍵變數給 finished 使用
+                self._last_calc_frame = frame.copy()
+                self._last_calc_dpr = dpr
+                self._last_calc_t_start = t_start
+                self._last_calc_t_captured = t_captured
                 
-                h, w = logic_quantized.shape[:2]
+        except Exception as e:
+            print(f"[Error] refresh_frame crash: {e}")
+            self._is_refreshing = False
+
+    def _on_calc_finished(self, logic_quantized: np.ndarray, logic_indices: np.ndarray, edges: np.ndarray | None, t_computed: float) -> None:
+        try:
+            if not hasattr(self, '_last_calc_frame') or self._last_calc_frame is None:
+                return
                 
-                # 處理邊緣與比例 (Edge Mix)
-                if edges is not None:
-                    mix = self.settings.edge_mix / 100.0
-                    ec = self.settings.edge_color[::-1] # RGB -> BGR (預設為黑色)
-                    
-                    # 原始量化圖轉為 BGR 用於混合
-                    base_bgr = cv2.cvtColor(logic_quantized, cv2.COLOR_GRAY2BGR)
-                    
-                    if mix >= 1.0:
-                        # 純邊緣模式：背景全白，邊緣為黑色 (或設定色)
-                        final_bgr = np.full_like(base_bgr, 255)
-                        final_bgr[edges > 0] = ec
-                    else:
-                        # 混合模式：(1-mix) * 原圖 + mix * 白色背景，最後疊加邊緣
-                        # 讓原圖隨著 mix 增加而淡出至白色
-                        bg_part = (base_bgr.astype(np.float32) * (1.0 - mix) + 255.0 * mix).astype(np.uint8)
-                        final_bgr = bg_part
-                        final_bgr[edges > 0] = ec
-                    
-                    # 轉回 RGB 給 QImage
-                    self._frame_array = np.ascontiguousarray(cv2.cvtColor(final_bgr, cv2.COLOR_BGR2RGB))
-                    qimg = bgr_to_qimage(final_bgr)
+            frame = self._last_calc_frame
+            dpr = self._last_calc_dpr
+            t_start = self._last_calc_t_start
+            t_captured = self._last_calc_t_captured
+            
+            # 釋放引用避免記憶體洩漏
+            self._last_calc_frame = None
+            
+            h, w = logic_quantized.shape[:2]
+            
+            # 處理邊緣與比例 (Edge Mix)
+            if edges is not None:
+                mix = self.settings.edge_mix / 100.0
+                ec = self.settings.edge_color[::-1] # RGB -> BGR
+                
+                base_bgr = cv2.cvtColor(logic_quantized, cv2.COLOR_GRAY2BGR)
+                
+                if mix >= 1.0:
+                    final_bgr = np.full_like(base_bgr, 255)
+                    final_bgr[edges > 0] = ec
                 else:
-                    self._frame_array = logic_quantized
-                    qimg = gray_to_qimage(logic_quantized)
+                    bg_part = (base_bgr.astype(np.float32) * (1.0 - mix) + 255.0 * mix).astype(np.uint8)
+                    final_bgr = bg_part
+                    final_bgr[edges > 0] = ec
                 
-                qimg.setDevicePixelRatio(dpr)
-                self._frame = QPixmap.fromImage(qimg)
-                self._update_distributions(self._last_gray_frame, logic_indices)
+                self._frame_array = np.ascontiguousarray(cv2.cvtColor(final_bgr, cv2.COLOR_BGR2RGB))
+                qimg = bgr_to_qimage(final_bgr)
+            else:
+                self._frame_array = logic_quantized
+                qimg = gray_to_qimage(logic_quantized)
+            
+            qimg.setDevicePixelRatio(dpr)
+            self._frame = QPixmap.fromImage(qimg)
+            self._update_distributions(self._last_gray_frame, logic_indices)
             
             # 3. 處理對照圖
             if self._compare_mode:
@@ -951,12 +1017,12 @@ class OverlayWindow(QMainWindow):
                 self._raw_frame = QPixmap.fromImage(raw_qimg)
             else:
                 self._raw_frame = QPixmap()
-            
+                
             self.update()
             t_rendered = time.perf_counter()
             
             # --- Profiling 測速節流輸出 ---
-            PROFILING = True  # <<-- 檢修時開啟，關閉改為 False
+            PROFILING = True
             if PROFILING:
                 if not hasattr(self, '_last_profile_ts'):
                     self._last_profile_ts = 0.0
@@ -964,8 +1030,8 @@ class OverlayWindow(QMainWindow):
                 if now_ts - self._last_profile_ts > 0.33:
                     self._last_profile_ts = now_ts
                     c_cap = (t_captured - t_start) * 1000
-                    c_comp = (t_computed - t_captured) * 1000
-                    c_ui = (t_rendered - t_computed) * 1000
+                    c_comp = t_computed * 1000
+                    c_ui = (t_rendered - (t_captured + t_computed)) * 1000
                     c_total = (t_rendered - t_start) * 1000
                     
                     s = self.settings
@@ -991,7 +1057,6 @@ class OverlayWindow(QMainWindow):
                 else:
                     self.on_auto_balance_raw_requested()
             elif self._auto_continuous_enabled:
-                # 如果開啟了「計算全圖」，且數據來源是靜態的 (StaticMode)，則只需計算一次
                 if self._is_static_mode and self._use_global_calc:
                     if self._global_calc_dirty:
                         self._global_calc_dirty = False
@@ -1001,8 +1066,6 @@ class OverlayWindow(QMainWindow):
                         else:
                             self.on_auto_balance_raw_requested()
                 else:
-                    # 情況 A: 即時模式 (Live)
-                    # 情況 B: 靜態模式但關閉全圖計算 (Local) -> 隨縮放/平移持續追蹤
                     now = time.monotonic()
                     if now - self._last_auto_balance_ts > 0.15:
                         self._last_auto_balance_ts = now
@@ -1014,7 +1077,6 @@ class OverlayWindow(QMainWindow):
             
             # 如果錄製視窗開啟中，則將完整的視窗內容「照翻」過去
             if self._mirror_window and self._mirror_window.isVisible():
-                # 使用 grab 擷取整個視窗（含工具列）
                 pix = self.grab()
                 self._mirror_window.update_frame(pix)
 
