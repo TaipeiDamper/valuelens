@@ -19,6 +19,7 @@ from valuelens.core.hotkey_service import HotkeyService
 from valuelens.core.qt_image import bgr_to_qimage, gray_to_qimage, qimage_to_bgr
 from valuelens.core.quantize import native_distribution_from_indices, quantize_gray, quantize_gray_with_indices
 from valuelens.core.engine import ImageProcessWorker, AutoBalanceWorker
+from valuelens.core.scene_detector import GridSceneDetector
 from valuelens.core.sources import LiveScreenSource, StaticImageSource, FrameContext
 from valuelens.modes.image_mode import ImageModeDialog
 from valuelens.ui.control_panel import ControlPanel
@@ -65,6 +66,9 @@ class OverlayWindow(QMainWindow):
         
         self.auto_balance_worker = AutoBalanceWorker(self)
         self.auto_balance_worker.finished.connect(self._on_auto_balance_finished)
+        
+        # 初始化井字網格背景檢測器，預設門檻值設為 20.0
+        self.scene_detector = GridSceneDetector(threshold=20.0, grid_count=2)
         
         self.image_mode = ImageModeDialog(settings=self.settings, parent=self)
         self.image_mode.set_import_callback(self._get_current_raw_frame)
@@ -578,18 +582,30 @@ class OverlayWindow(QMainWindow):
         )
 
     def _on_auto_balance_finished(self, lower: int, upper: int, exp_value: float) -> None:
-        def smooth_and_clamp(new, old, alpha=0.3, max_step=None):
+        def smooth_and_clamp(new, old, alpha=0.3, max_step=None, jump_thresh=45):
             diff = new - old
+            if abs(diff) > jump_thresh:
+                return new  # 背景大範圍轉換，直接瞬移
             if abs(diff) < 0.5: return old
             step = diff * alpha
             if max_step is not None:
                 step = max(-max_step, min(max_step, step))
             return old + step
 
+        def smooth_and_clamp_float(new, old, alpha=0.3, max_step=None, jump_thresh=0.6):
+            diff = new - old
+            if abs(diff) > jump_thresh:
+                return new
+            if abs(diff) < 0.01: return old
+            step = diff * alpha
+            if max_step is not None:
+                step = max(-max_step, min(max_step, step))
+            return old + step
+
         if self._auto_continuous_enabled:
-            lower = int(round(smooth_and_clamp(lower, self.settings.min_value, 0.5, max_step=30)))
-            upper = int(round(smooth_and_clamp(upper, self.settings.max_value, 0.5, max_step=30)))
-            exp_value = smooth_and_clamp(exp_value, self.settings.exp_value, 0.4, max_step=0.5)
+            lower = int(round(smooth_and_clamp(lower, self.settings.min_value, 0.5, max_step=30, jump_thresh=45)))
+            upper = int(round(smooth_and_clamp(upper, self.settings.max_value, 0.5, max_step=30, jump_thresh=45)))
+            exp_value = smooth_and_clamp_float(exp_value, self.settings.exp_value, 0.4, max_step=0.5, jump_thresh=0.6)
         
         changed = (
             abs(lower - self.settings.min_value) >= 1 or
@@ -957,9 +973,12 @@ class OverlayWindow(QMainWindow):
                     now = time.monotonic()
                     if now - self._last_auto_balance_ts > 0.15:
                         self._last_auto_balance_ts = now
-                        current_target = self.panel.balance_presets.currentData()
-                        if current_target:
-                            self.on_auto_balance_target_requested(current_target)
+                        
+                        # 僅在畫面井字網格的變化量大於 threshold 時，才請求更新黑白灰參數
+                        if self._last_gray_frame is not None and self.scene_detector.detect_change(self._last_gray_frame):
+                            current_target = self.panel.balance_presets.currentData()
+                            if current_target:
+                                self.on_auto_balance_target_requested(current_target)
         finally:
             self._is_refreshing = False
             

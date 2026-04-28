@@ -239,16 +239,25 @@ def quantize_gray_with_indices(
     lut = get_quantization_lut(ctx.levels, ctx.min_val, ctx.max_val, ctx.exp_val)
     ctx.indices = cv2.LUT(ctx.working_gray, lut).astype(np.int32)
     
-    # --- 顯示輸出映射 (Display Mapping) ---
+    # --- 顯示輸出映射 (Display Mapping) 查表優化 ---
     d_min = display_min if display_min is not None else 0
     d_max = display_max if display_max is not None else 255
     d_exp = display_exp if display_exp is not None else 0
     
-    norm = ctx.indices.astype(np.float32) / (levels - 1)
+    # 僅針對少數離散階調值進行浮點與 Gamma 運算
+    lut_inputs = np.arange(levels, dtype=np.float32)
+    norm_lut = lut_inputs / (levels - 1)
     if d_exp != 0:
         gamma_display = float(np.power(2.0, float(d_exp)))
-        norm = np.power(norm, gamma_display)
-    out = (norm * (d_max - d_min) + d_min).astype(np.uint8)
+        norm_lut = np.power(norm_lut, gamma_display)
+    out_lut = (norm_lut * (d_max - d_min) + d_min).astype(np.uint8)
+    
+    # 填入適用於 cv2.LUT 的 256 長度映射表
+    full_display_lut = np.zeros(256, dtype=np.uint8)
+    full_display_lut[:levels] = out_lut
+    
+    # 透過 OpenCV 的 C++ 底層引擎瞬間完成千萬像素查表
+    out = cv2.LUT(ctx.indices.astype(np.uint8), full_display_lut)
     
     if ctx.morph_mask is not None:
         out[ctx.morph_mask] = 0
