@@ -109,7 +109,8 @@ def optimize_balance_params(
     current_min: int,
     current_max: int,
     current_exp: float,
-    levels_count: int
+    levels_count: int,
+    hysteresis: float = 0.0
 ) -> tuple[int, int, float]:
     """全自動分析最佳平衡參數的核心算法"""
     hist = np.bincount(gray.reshape(-1).astype(np.uint8), minlength=256).astype(np.float64)
@@ -142,10 +143,17 @@ def optimize_balance_params(
     lo_candidates = sorted(list(set([find_val(pct_black + s) for s in p_samples] + [guess_min])))
     hi_candidates = sorted(list(set([find_val(pct_not_white + s) for s in p_samples] + [guess_max])))
 
-    best_loss = float('inf')
-    best_params = (current_min, current_max, current_exp)
     levels = max(2, int(levels_count))
     target_ratios = np.array([t_black, t_gray, t_white]) / t_total
+    
+    # 評估目前參數的 Loss (主場優勢/防震盪)
+    current_dist = distribution_from_hist(hist, current_min, current_max, levels, current_exp)
+    diff_curr = current_dist - target_ratios
+    current_loss = float(np.dot(diff_curr, diff_curr))
+    
+    best_loss = current_loss - hysteresis
+    best_params = (current_min, current_max, current_exp)
+    
     
     for lo in lo_candidates:
         if lo > 240: continue

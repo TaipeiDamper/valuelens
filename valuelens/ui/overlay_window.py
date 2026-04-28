@@ -19,6 +19,7 @@ from valuelens.core.hotkey_service import HotkeyService
 from valuelens.core.qt_image import bgr_to_qimage, gray_to_qimage, qimage_to_bgr
 from valuelens.core.quantize import native_distribution_from_indices, quantize_gray, quantize_gray_with_indices
 from valuelens.core.engine import ImageProcessWorker
+from valuelens.core.sources import LiveScreenSource, StaticImageSource, FrameContext
 from valuelens.modes.image_mode import ImageModeDialog
 from valuelens.ui.control_panel import ControlPanel
 from valuelens.ui.mirror_window import MirrorWindow
@@ -54,6 +55,7 @@ class OverlayWindow(QMainWindow):
             self._apply_startup_preset(self.settings.startup_preset)
 
         self.capture = CaptureService()
+        self.frame_source = LiveScreenSource(self.capture)
         self.hotkeys = HotkeyService()
         
         self.store.state_changed.connect(self._on_state_changed)
@@ -122,16 +124,11 @@ class OverlayWindow(QMainWindow):
         self._bypass_mode = False           # Bypass: 跳過所有處理
         self._is_static_mode = False        # 是否處於靜態分析模式 (Frozen 或 ImageMode)
         self._static_source_type = ""       # "frozen" 或 "image"
-        self._source_image = None           # 靜態模式下的原始底圖 (BGR)
         self._full_image_gray = None        # 靜態模式下的整張灰階快取
-        self._pan_offset_x = 0             # 圖片平移 X 偏移
-        self._pan_offset_y = 0             # 圖片平移 Y 偏移
-        self._zoom_factor = 1.0            # 圖片縮放倍率
         self._use_global_calc = False      # 是否使用全圖計算 (ImageMode)
         self._rect_compare_bw = QRect()    # 黑白對比按鈕區域 (手動繪製)
         self._rect_global_calc = QRect()   # 計算全圖按鈕區域 (手動繪製)
         self._pan_drag_start = None        # 平移拖曳起始點
-        self._pan_start_offset = None      # 平移拖曳起始偏移
         self._global_calc_dirty = False    # 標記全圖計算是否需要重新執行一次
         self._last_auto_balance_ts = 0.0
         self._last_raw_bgr_frame = None
@@ -324,15 +321,11 @@ class OverlayWindow(QMainWindow):
 
     def toggle_freeze_mode(self) -> None:
         """切換凍結模式：鎖定當前畫面或恢復即時擷取。同時處理 ImageMode 釋放。"""
-        if self._is_static_mode:
+        if self.frame_source.is_static:
             # 恢復即時模式
-            self._is_static_mode = False
+            self.frame_source = LiveScreenSource(self.capture)
             self._static_source_type = ""
-            self._source_image = None
             self._full_image_gray = None
-            self._pan_offset_x = 0
-            self._pan_offset_y = 0
-            self._zoom_factor = 1.0
             self.panel.freeze_btn.setProperty("freeze_mode", "")
             self.panel.freeze_btn.style().unpolish(self.panel.freeze_btn)
             self.panel.freeze_btn.style().polish(self.panel.freeze_btn)
@@ -350,7 +343,7 @@ class OverlayWindow(QMainWindow):
                     exclude_hwnd=self._hwnd()
                 )
             else:
-                frame = self._last_raw_bgr_frame
+                frame = getattr(self.frame_source, 'last_raw_frame', None)
                 if frame is None:
                     rect = self._lens_rect()
                     frame = self.capture.capture_region(
@@ -359,15 +352,9 @@ class OverlayWindow(QMainWindow):
                     )
                 
             if frame is not None:
-                self._is_static_mode = True
+                self.frame_source = StaticImageSource(frame.copy(), "frozen")
                 self._static_source_type = "frozen"
-                self._source_image = frame.copy()
-                self._full_image_gray = cv2.cvtColor(self._source_image, cv2.COLOR_BGR2GRAY)
-                
-                # 進入靜態模式時重置縮放與偏移
-                self._pan_offset_x = 0
-                self._pan_offset_y = 0
-                self._zoom_factor = 1.0
+                self._full_image_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 
                 self.panel.freeze_btn.setProperty("freeze_mode", "frozen")
                 self.panel.freeze_btn.style().unpolish(self.panel.freeze_btn)
@@ -390,21 +377,17 @@ class OverlayWindow(QMainWindow):
     def import_image(self, bgr_image: np.ndarray) -> None:
         """匯入外部圖片，進入 StaticMode (Image 類型)。"""
         print(f"[DEBUG][User Action] 匯入靜態圖片, 大小={bgr_image.shape}")
-        self._source_image = bgr_image.copy()
-        self._full_image_gray = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY)
-        self._is_static_mode = True
+        self.frame_source = StaticImageSource(bgr_image, "image")
         self._static_source_type = "image"
-        
-        self._pan_offset_x = 0
-        self._pan_offset_y = 0
-        self._zoom_factor = 1.0
+        self._full_image_gray = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY)
+
         self.panel.freeze_btn.setProperty("freeze_mode", "image")
         self.panel.freeze_btn.style().unpolish(self.panel.freeze_btn)
         self.panel.freeze_btn.style().polish(self.panel.freeze_btn)
         self.panel.freeze_btn.setToolTip("點擊退出圖片模式")
         self._last_frame_signature = None
         self._is_refreshing = False
-        print(f"[StaticMode] ENTERED via Import, shape={bgr_image.shape}")
+        print(f"[StaticMode] ENTERED via Import Image, shape={bgr_image.shape}")
         self._layout_overlay_buttons()
         # 匯入時自動執行一次平衡
         self._auto_balance_pending = True
@@ -577,26 +560,33 @@ class OverlayWindow(QMainWindow):
             return
             
         from valuelens.core.balance import optimize_balance_params
+        # 防震盪：持續平衡模式下，給予目前參數「主場優勢」，避免在兩個相近的最佳解之間反覆橫跳
+        hysteresis_val = 0.005 if self._auto_continuous_enabled else 0.0
+        
         lower, upper, exp_value = optimize_balance_params(
             source_gray,
             ratios,
             self.settings.min_value,
             self.settings.max_value,
             self.settings.exp_value,
-            self.settings.levels
+            self.settings.levels,
+            hysteresis=hysteresis_val
         )
         
         # 參數平滑處理 (防止跳動)
-        # 如果變動極小，則不更新；如果變動中等，則混合一部分舊值
-        def smooth(new, old, alpha=0.3):
-            if abs(new - old) < 0.5: return old
-            return old * (1 - alpha) + new * alpha
+        def smooth_and_clamp(new, old, alpha=0.3, max_step=None):
+            diff = new - old
+            if abs(diff) < 0.5: return old
+            step = diff * alpha
+            if max_step is not None:
+                step = max(-max_step, min(max_step, step))
+            return old + step
 
         if self._auto_continuous_enabled:
-            # 持續模式下使用平滑
-            lower = int(round(smooth(lower, self.settings.min_value, 0.4)))
-            upper = int(round(smooth(upper, self.settings.max_value, 0.4)))
-            exp_value = smooth(exp_value, self.settings.exp_value, 0.3)
+            # 持續模式下使用平滑與最大步長限制，讓漸變更自然
+            lower = int(round(smooth_and_clamp(lower, self.settings.min_value, 0.4, max_step=10)))
+            upper = int(round(smooth_and_clamp(upper, self.settings.max_value, 0.4, max_step=10)))
+            exp_value = smooth_and_clamp(exp_value, self.settings.exp_value, 0.3, max_step=0.2)
         
         changed = (
             abs(lower - self.settings.min_value) >= 1 or
@@ -746,7 +736,7 @@ class OverlayWindow(QMainWindow):
         self.request_refresh(0)
         
         # 確保懸浮按鈕位置正確
-        if self._is_static_mode and self._stable_frame_count % 10 == 0:
+        if self.frame_source.is_static and self._stable_frame_count % 10 == 0:
             self._layout_overlay_buttons()
 
     def _hwnd(self) -> int | None:
@@ -801,92 +791,21 @@ class OverlayWindow(QMainWindow):
             dpr = self.devicePixelRatioF()
             
             # --- 核心邏輯：決定影像來源 ---
-            if self._is_static_mode and self._source_image is not None:
-                # 靜態分析模式 (Frozen 或 Import)：處理縮放、平移與 Padding
-                src = self._source_image
-                sh, sw = src.shape[:2]
-                view_w_phys = max(1, int(round(rect.width() * dpr)))
-                view_h_phys = max(1, int(round(rect.height() * dpr)))
-                
-                # 最小縮放限制 (確保長邊 1.5x)
-                view_long = max(view_w_phys, view_h_phys)
-                img_long = max(sw, sh)
-                min_zoom = view_long / (1.5 * img_long)
-                if self._zoom_factor < min_zoom:
-                    self._zoom_factor = min_zoom
-
-                vsw = sw * self._zoom_factor
-                vsh = sh * self._zoom_factor
-                
-                # 限制平移偏移 (處理 Padding)
-                if vsw > view_w_phys:
-                    self._pan_offset_x = max(0, min(self._pan_offset_x, vsw - view_w_phys))
-                else:
-                    self._pan_offset_x = (vsw - view_w_phys) / 2
-                    
-                if vsh > view_h_phys:
-                    self._pan_offset_y = max(0, min(self._pan_offset_y, vsh - view_h_phys))
-                else:
-                    self._pan_offset_y = (vsh - view_h_phys) / 2
-                
-                # 裁切並縮放有效像素
-                sx1 = max(0, int(round(self._pan_offset_x / self._zoom_factor)))
-                sy1 = max(0, int(round(self._pan_offset_y / self._zoom_factor)))
-                sx2 = min(sw, int(round((self._pan_offset_x + view_w_phys) / self._zoom_factor)))
-                sy2 = min(sh, int(round((self._pan_offset_y + view_h_phys) / self._zoom_factor)))
-                
-                crop = src[sy1:sy2, sx1:sx2]
-                
-                if crop.size > 0:
-                    target_w = int(round((sx2 - sx1) * self._zoom_factor))
-                    target_h = int(round((sy2 - sy1) * self._zoom_factor))
-                    if target_w > 0 and target_h > 0:
-                        resized_crop = cv2.resize(crop, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-                        frame = np.full((view_h_phys, view_w_phys, 3), 34, dtype=np.uint8)
-                        dx = max(0, int(round(-self._pan_offset_x)))
-                        dy = max(0, int(round(-self._pan_offset_y)))
-                        fh, fw = resized_crop.shape[:2]
-                        # 安全複製：確保不超出邊界且形狀匹配
-                        jh = min(fh, view_h_phys - dy)
-                        jw = min(fw, view_w_phys - dx)
-                        if jh > 0 and jw > 0:
-                            frame[dy:dy+jh, dx:dx+jw] = resized_crop[:jh, :jw]
-                        
-                        # 更新計算用的灰階影像 (排除 Padding)
-                        self._last_gray_frame = cv2.cvtColor(resized_crop, cv2.COLOR_BGR2GRAY)
-                    else:
-                        frame = np.full((view_h_phys, view_w_phys, 3), 34, dtype=np.uint8)
-                        self._last_gray_frame = None
-                else:
-                    frame = np.full((view_h_phys, view_w_phys, 3), 34, dtype=np.uint8)
-                    self._last_gray_frame = None
-            else:
-                # 即時模式 (Live)：從螢幕擷取
-                phys = self._physical_window_rect()
-                if phys is not None:
-                    win_x, win_y, win_pw, win_ph = phys
-                    panel_h_phys = int(round(self._panel_height * dpr))
-                    cap_x, cap_y = win_x, win_y + panel_h_phys
-                    cap_w, cap_h = win_pw, max(1, win_ph - panel_h_phys)
-                else:
-                    cap_x = int(round((self.x() + rect.x()) * dpr))
-                    cap_y = int(round((self.y() + rect.y()) * dpr))
-                    cap_w = max(1, int(round(rect.width() * dpr)))
-                    cap_h = max(1, int(round(rect.height() * dpr)))
-                
-                hwnd = self._hwnd()
-                frame = self.capture.capture_region(
-                    cap_x, cap_y, cap_w, cap_h, exclude_hwnd=hwnd
-                )
-                if frame is not None:
-                    self._last_raw_bgr_frame = frame.copy()
-                t_captured = time.perf_counter()
+            ctx = FrameContext(
+                view_rect=(rect.x(), rect.y(), rect.width(), rect.height()),
+                dpr=dpr,
+                phys_rect=self._physical_window_rect(),
+                hwnd=self._hwnd(),
+                panel_height=self._panel_height
+            )
+            frame, gray_frame = self.frame_source.get_frame(ctx)
+            t_captured = time.perf_counter()
             
-            if frame is None or frame.size == 0: 
+            if frame is None or frame.size == 0 or gray_frame is None: 
                 self._is_refreshing = False
                 return
 
-            self._last_gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            self._last_gray_frame = gray_frame
 
             # 特徵檢查
             signature = self._frame_signature(frame)
@@ -1243,11 +1162,11 @@ class OverlayWindow(QMainWindow):
                 return
 
             # 靜態模式 (StaticMode) 下鏡片區域 → 左鍵平移圖片
-            if self._is_static_mode and self._source_image is not None:
+            if self.frame_source.is_static:
                 lens = self._lens_rect()
                 if lens.contains(pos) or (self._compare_mode and self._compare_rect().contains(pos)):
                     self._pan_drag_start = event.globalPosition().toPoint()
-                    self._pan_start_offset = (self._pan_offset_x, self._pan_offset_y)
+                    self._pan_start_offset = (self.frame_source.pan_offset_x, self.frame_source.pan_offset_y)
                     event.accept()
                     return
             self._is_dragging = True
@@ -1279,13 +1198,19 @@ class OverlayWindow(QMainWindow):
 
         # ImageMode 平移圖片 (僅限左鍵)
         if (event.buttons() & Qt.MouseButton.LeftButton) and self._pan_drag_start is not None and self._pan_start_offset is not None:
-            dpr = self.devicePixelRatioF()
-            delta = self._pan_drag_start - event.globalPosition().toPoint()
-            self._pan_offset_x = self._pan_start_offset[0] + delta.x() * dpr
-            self._pan_offset_y = self._pan_start_offset[1] + delta.y() * dpr
-            self._last_frame_signature = None
-            self._is_refreshing = False
-            self.refresh_frame()
+            if self.frame_source.is_static:
+                dpr = self.devicePixelRatioF()
+                delta = self._pan_drag_start - event.globalPosition().toPoint()
+                # 重新計算絕對 pan offset 並設定 (因為我們原本的 pan 是相加，所以這裡要調整)
+                # 等等，如果 _pan_start_offset 存的是舊的 pan，現在 FrameSource 把 pan 當狀態了。
+                # 我們可以改成：
+                new_pan_x = self._pan_start_offset[0] + delta.x() * dpr
+                new_pan_y = self._pan_start_offset[1] + delta.y() * dpr
+                self.frame_source.pan_offset_x = new_pan_x
+                self.frame_source.pan_offset_y = new_pan_y
+                self._last_frame_signature = None
+                self._is_refreshing = False
+                self.refresh_frame()
             return
 
         if self._drag_pos is None:
@@ -1355,11 +1280,9 @@ class OverlayWindow(QMainWindow):
         self.request_refresh(20)
 
     def wheelEvent(self, event) -> None:  # type: ignore[override]
-        if not self._is_static_mode or self._source_image is None:
+        if not self.frame_source.is_static:
             super().wheelEvent(event)
             return
-
-        source = self._source_image
 
         # 鏡片區域內的縮放
         pos = event.position().toPoint()
@@ -1378,31 +1301,12 @@ class OverlayWindow(QMainWindow):
             # 計算新的縮放倍率
             angle = event.angleDelta().y()
             zoom_step = 1.15 if angle > 0 else (1.0 / 1.15)
-            old_zoom = self._zoom_factor
             
-            # 計算最小縮放限制：視窗長邊 = 1.5 * 圖片長邊
-            # 換言之：圖片長邊 = 視窗長邊 / 1.5 (確保容納全圖)
-            sh, sw = source.shape[:2]
-            view_w_phys = max(1, int(round(self.width() * dpr)))
-            view_h_phys = max(1, int(round((self.height() - self._panel_height) * dpr)))
-            view_long = max(view_w_phys, view_h_phys)
-            img_long = max(sw, sh)
+            self.frame_source.zoom(zoom_step, mx, my)
             
-            min_zoom = view_long / (1.5 * img_long)
-            max_zoom = 20.0
-            
-            new_zoom = max(min_zoom, min(max_zoom, old_zoom * zoom_step))
-            
-            if new_zoom != old_zoom:
-                # 調整 pan_offset 讓縮放中心保持在滑鼠位置
-                # 公式：new_offset = (old_offset + mouse_pos) * (new_zoom / old_zoom) - mouse_pos
-                self._pan_offset_x = (self._pan_offset_x + mx) * (new_zoom / old_zoom) - mx
-                self._pan_offset_y = (self._pan_offset_y + my) * (new_zoom / old_zoom) - my
-                self._zoom_factor = new_zoom
-                
-                self._last_frame_signature = None
-                self._is_refreshing = False
-                self.refresh_frame()
+            self._last_frame_signature = None
+            self._is_refreshing = False
+            self.refresh_frame()
             event.accept()
         else:
             super().wheelEvent(event)
