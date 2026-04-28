@@ -61,6 +61,10 @@ class OverlayWindow(QMainWindow):
         self.image_mode = ImageModeDialog(settings=self.settings, parent=self)
         self.image_mode.set_import_callback(self._get_current_raw_frame)
 
+        from valuelens.ui.render_widget import RenderWidget
+        self.canvas = RenderWidget(self)
+        self.canvas.setGeometry(self.rect())
+        self.canvas.lower()
         self.setGeometry(settings.x, settings.y, settings.width, settings.height)
         
         # 啟動安全性檢查：如果視窗完全在螢幕外，則自動居中
@@ -932,6 +936,8 @@ class OverlayWindow(QMainWindow):
                 self._raw_frame = QPixmap()
                 
             self.update()
+            if hasattr(self, 'canvas'):
+                self.canvas.update()
             t_rendered = time.perf_counter()
             
             # --- Profiling 測速節流輸出 ---
@@ -1000,51 +1006,7 @@ class OverlayWindow(QMainWindow):
         sampled = frame[::8, ::8]
         return sampled.tobytes()
 
-    def paintEvent(self, event) -> None:  # type: ignore[override]
-        painter = QPainter(self)
-        lens = self._lens_rect()
-        compare = self._compare_rect()
-        painter.setClipRect(self.rect())
-        if self._frame.isNull():
-            painter.fillRect(lens, Qt.GlobalColor.black)
-        else:
-            painter.drawPixmap(lens.topLeft(), self._frame)
-        if self._compare_mode and not compare.isNull():
-            if self._raw_frame.isNull():
-                painter.fillRect(compare, Qt.GlobalColor.black)
-            else:
-                painter.drawPixmap(compare.topLeft(), self._raw_frame)
-            painter.setPen(Qt.GlobalColor.darkGray)
-            divider_x = lens.right() + (self._compare_gap // 2) + 1
-            painter.drawLine(divider_x, lens.y(), divider_x, lens.bottom())
-        
-        # --- 繪製全視窗外框 (防止視窗在全黑背景下看不見) ---
-        painter.setPen(QColor(100, 100, 100, 180)) # 灰色半透明邊框
-        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
-
-        painter.setPen(Qt.GlobalColor.white)
-        painter.drawRect(lens.adjusted(0, 0, -1, -1))
-        if self._show_distribution:
-            self._draw_distribution_overlay(painter, lens, self._processed_distribution_pct, "處理")
-        if self._compare_mode and not compare.isNull():
-            painter.drawRect(compare.adjusted(0, 0, -1, -1))
-            if self._show_distribution:
-                self._draw_distribution_overlay(painter, compare, self._raw_distribution_pct, "原始")
-                
-        # --- 繪製手動按鈕 ---
-        if not self._rect_compare_bw.isNull():
-            self._draw_manual_button(painter, self._rect_compare_bw, "黑白", self.settings.compare_bw)
-        if not self._rect_global_calc.isNull():
-            self._draw_manual_button(painter, self._rect_global_calc, "計算全圖", self._use_global_calc)
-
-    def _draw_manual_button(self, painter: QPainter, rect: QRect, text: str, checked: bool) -> None:
-        """手動繪製一個看起來像 QToolButton 的按鈕。"""
-        bg_color = QColor(46, 123, 246) if checked else QColor(0, 0, 0, 150)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.GlobalColor.white)
-        painter.setBrush(bg_color)
-        painter.drawRoundedRect(rect, 4, 4)
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+    # paintEvent 與 _draw_manual_button 已經搬移至 RenderWidget (valuelens/ui/render_widget.py)
 
 
     def _update_distributions(
@@ -1057,30 +1019,7 @@ class OverlayWindow(QMainWindow):
             processed_indices, level_count
         )
 
-    def _draw_distribution_overlay(
-        self, painter: QPainter, rect: QRect, values: list[float], title: str
-    ) -> None:
-        _ = title  # keep signature stable for current call sites
-        display_values = list(reversed(values))  # white -> black
-        rows_count = max(1, len(display_values))
-        row_h = 24
-        block_height = rows_count * row_h + 2
-        block_rect = QRect(rect.left() + 8, rect.top() + 8, 116, block_height)
-        painter.fillRect(block_rect, Qt.GlobalColor.black)
-        painter.setPen(Qt.GlobalColor.white)
-        painter.drawRect(block_rect.adjusted(0, 0, -1, -1))
-
-        for idx, pct in enumerate(display_values):
-            top = block_rect.top() + 1 + idx * row_h
-            row_rect = QRect(block_rect.left() + 1, top, block_rect.width() - 2, row_h - 1)
-            tone = int(round(((rows_count - 1 - idx) / max(1, rows_count - 1)) * 255))
-            fill_color = QColor(tone, tone, tone)
-            text_color = Qt.GlobalColor.black if tone >= 128 else Qt.GlobalColor.white
-            painter.fillRect(row_rect, fill_color)
-            painter.setPen(Qt.GlobalColor.white)
-            painter.drawRect(row_rect.adjusted(0, 0, -1, -1))
-            painter.setPen(text_color)
-            painter.drawText(row_rect, Qt.AlignmentFlag.AlignCenter, f"{pct:.1f}%")
+    # _draw_distribution_overlay 已經搬移至 RenderWidget (valuelens/ui/render_widget.py)
 
     def _edges_at(self, pos: QPoint) -> int:
         edges = 0
@@ -1366,6 +1305,8 @@ class OverlayWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        if hasattr(self, 'canvas'):
+            self.canvas.setGeometry(self.rect())
         self._layout_panel()
         self._layout_overlay_buttons()
         self.request_refresh(20)
