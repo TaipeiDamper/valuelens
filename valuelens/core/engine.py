@@ -14,18 +14,28 @@ class ImageProcessWorker(QThread):
         super().__init__(parent)
         self._busy = False
         self._pending_task = None
+        self._is_stopping = False
 
     def is_busy(self) -> bool:
         return self._busy
 
     def process_frame(self, frame: np.ndarray, settings: AppSettings) -> None:
         """排程一個運算任務，若目前在忙則直接覆蓋暫存任務(永遠只算最新的一張)。"""
+        if self._is_stopping:
+            return
         self._pending_task = (frame, settings)
         if not self.isRunning():
             self.start()
 
+    def stop(self) -> None:
+        """優雅且安全地終止執行緒。"""
+        self._is_stopping = True
+        self._pending_task = None
+        self.quit()
+        self.wait()
+
     def run(self) -> None:
-        while self._pending_task is not None:
+        while self._pending_task is not None and not self._is_stopping:
             self._busy = True
             frame, settings = self._pending_task
             self._pending_task = None

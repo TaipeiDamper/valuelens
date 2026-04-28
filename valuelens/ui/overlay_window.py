@@ -746,9 +746,8 @@ class OverlayWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._coalesce_timer.stop()
-        if hasattr(self, "calc_worker") and self.calc_worker.isRunning():
-            self.calc_worker.quit()
-            self.calc_worker.wait()
+        if hasattr(self, "calc_worker"):
+            self.calc_worker.stop()
         event.accept()
 
     def refresh_frame(self) -> None:
