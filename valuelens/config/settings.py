@@ -29,6 +29,7 @@ class AppSettings:
     edge_color: tuple[int, int, int] = (0, 0, 0)
     morph_enabled: bool = False
     morph_strength: int = 1
+    morph_threshold: int = 35
     refresh_ms: int = 100
     x: int = 200
     y: int = 200

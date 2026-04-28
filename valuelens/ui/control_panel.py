@@ -105,7 +105,7 @@ QSlider#blur_slider::sub-page:horizontal { background: #4CAF50; }
 QSlider#dither_slider::sub-page:horizontal { background: #2196F3; }
 QSlider#edge_slider::sub-page:horizontal { background: #FF9800; }
 QSlider#edge_mix_slider::sub-page:horizontal { background: #FF9800; }
-QSlider#morph_slider::sub-page:horizontal { background: #E91E63; }
+QSlider#morph_slider::sub-page:horizontal, QSlider#morph_thresh_slider::sub-page:horizontal { background: #E91E63; }
 
 QSlider::handle:horizontal {
     background: #eee;
@@ -133,9 +133,8 @@ class ControlPanel(QWidget):
     import_requested = Signal()
     screenshot_requested = Signal()
     distribution_toggled = Signal(bool)
-    effect_settings_changed = Signal(bool, int, bool, int)
     edge_settings_changed = Signal(bool, int, int)
-    morph_settings_changed = Signal(bool, int)
+    morph_settings_changed = Signal(bool, int, int)
     order_changed = Signal(list)
     quit_requested = Signal()
     minimize_requested = Signal()
@@ -325,6 +324,13 @@ class ControlPanel(QWidget):
         self.morph_slider.setMinimumWidth(80)
         self.morph_slider.setToolTip("勾邊粗細 (Morphological Gradient)")
 
+        self.morph_thresh_slider = QSlider(Qt.Orientation.Horizontal)
+        self.morph_thresh_slider.setObjectName("morph_thresh_slider")
+        self.morph_thresh_slider.setRange(1, 255)
+        self.morph_thresh_slider.setValue(settings.morph_threshold)
+        self.morph_thresh_slider.setMinimumWidth(80)
+        self.morph_thresh_slider.setToolTip("勾邊靈敏度門檻 (降低防爆)")
+
         # Order Widget
         states = {
             "blur": settings.blur_enabled,
@@ -412,18 +418,20 @@ class ControlPanel(QWidget):
         params_grid.setSpacing(10)
         
         # 第一排：Smoothing, Dithering, Outlines
-        params_grid.addWidget(QLabel("平滑"), 0, 0)
+        params_grid.addWidget(QLabel("Blur"), 0, 0)
         params_grid.addWidget(self.blur_slider, 0, 1)
-        params_grid.addWidget(QLabel("抖動"), 0, 2)
+        params_grid.addWidget(QLabel("Dither"), 0, 2)
         params_grid.addWidget(self.dither_slider, 0, 3)
-        params_grid.addWidget(QLabel("勾邊"), 0, 4)
+        params_grid.addWidget(QLabel("Morph"), 0, 4)
         params_grid.addWidget(self.morph_slider, 0, 5)
         
         # 第二排：Edges 強度與比例
-        params_grid.addWidget(QLabel("連線強度"), 1, 0)
+        params_grid.addWidget(QLabel("Edge Strength"), 1, 0)
         params_grid.addWidget(self.edge_slider, 1, 1)
-        params_grid.addWidget(QLabel("連線比例"), 1, 2)
+        params_grid.addWidget(QLabel("Edge Mix"), 1, 2)
         params_grid.addWidget(self.edge_mix_slider, 1, 3)
+        params_grid.addWidget(QLabel("Morph Thresh"), 1, 4)
+        params_grid.addWidget(self.morph_thresh_slider, 1, 5)
         
         params_grid.setColumnStretch(1, 1)
         params_grid.setColumnStretch(3, 1)
@@ -468,6 +476,7 @@ class ControlPanel(QWidget):
         self.edge_slider.valueChanged.connect(self._emit_edge_settings)
         self.edge_mix_slider.valueChanged.connect(self._emit_edge_settings)
         self.morph_slider.valueChanged.connect(self._emit_morph_settings)
+        self.morph_thresh_slider.valueChanged.connect(self._emit_morph_settings)
         self.image_mode_action.triggered.connect(self.image_mode_requested.emit)
         self.hotkey_action.triggered.connect(self._prompt_hotkey)
         self.debug_screenshot_action.triggered.connect(self.debug_screenshot_requested.emit)
@@ -575,6 +584,7 @@ class ControlPanel(QWidget):
         self.morph_settings_changed.emit(
             self.order_widget._states.get("morph", True),
             self.morph_slider.value(),
+            self.morph_thresh_slider.value(),
         )
 
     def _prompt_hotkey(self) -> None:
@@ -728,6 +738,7 @@ class ControlPanel(QWidget):
         self.edge_slider.setValue(settings.edge_strength)
         self.edge_mix_slider.setValue(settings.edge_mix)
         self.morph_slider.setValue(settings.morph_strength)
+        self.morph_thresh_slider.setValue(settings.morph_threshold)
         self._current_hotkey = settings.hotkey
         self.hotkey_action.setText(f"設定快捷鍵 ({settings.hotkey})")
         # Update labels
@@ -893,10 +904,10 @@ class DraggableOrderWidget(QWidget):
         self._order = list(order)
         self._states = dict(states)
         self._item_map = {
-            "blur": "平滑",
-            "dither": "抖動",
-            "edge": "連線",
-            "morph": "勾邊"
+            "blur": "Blur",
+            "dither": "Dither",
+            "edge": "Edge",
+            "morph": "Morph"
         }
         self._colors = {
             "blur": "#4CAF50",

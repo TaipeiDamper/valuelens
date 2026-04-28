@@ -17,7 +17,7 @@ from valuelens.config.settings import AppSettings, SettingsManager
 from valuelens.core.capture_service import CaptureService
 from valuelens.core.hotkey_service import HotkeyService
 from valuelens.core.qt_image import bgr_to_qimage, gray_to_qimage, qimage_to_bgr
-from valuelens.core.quantize import native_distribution_from_indices, quantize_gray, quantize_gray_with_indices
+from valuelens.core.quantize import native_distribution_from_indices, quantize_gray, quantize_gray_with_indices, quantize_gray_with_indices_v2
 from valuelens.modes.image_mode import ImageModeDialog
 from valuelens.ui.control_panel import ControlPanel
 from valuelens.ui.mirror_window import MirrorWindow
@@ -416,6 +416,7 @@ class OverlayWindow(QMainWindow):
             self.settings.process_order,
             self.settings.morph_enabled,
             self.settings.morph_strength,
+            self.settings.morph_threshold,
         )
 
     def open_image_mode(self) -> None:
@@ -523,9 +524,10 @@ class OverlayWindow(QMainWindow):
         self._last_frame_signature = None
         self.request_refresh(16)
 
-    def on_morph_settings_changed(self, enabled: bool, strength: int) -> None:
+    def on_morph_settings_changed(self, enabled: bool, strength: int, threshold: int) -> None:
         self.settings.morph_enabled = enabled
         self.settings.morph_strength = strength
+        self.settings.morph_threshold = threshold
         self._sync_image_mode_settings()
         self._last_frame_signature = None
         self.request_refresh(16)
@@ -885,7 +887,7 @@ class OverlayWindow(QMainWindow):
                 eff_dither = self.settings.dither_strength if self.settings.dither_enabled else 0
                 eff_edge = self.settings.edge_strength if self.settings.edge_enabled else 0
                 
-                logic_quantized, logic_indices, edges = quantize_gray_with_indices(
+                logic_quantized, logic_indices, edges = quantize_gray_with_indices_v2(
                     frame,
                     self.settings.levels,
                     self.settings.min_value,
@@ -900,6 +902,7 @@ class OverlayWindow(QMainWindow):
                     process_order=self.settings.process_order,
                     morph_enabled=self.settings.morph_enabled,
                     morph_strength=self.settings.morph_strength,
+                    morph_threshold=self.settings.morph_threshold,
                 )
                 t_computed = time.perf_counter()
                 
@@ -974,7 +977,7 @@ class OverlayWindow(QMainWindow):
                     comp_on = "C" if self._compare_mode else "-"
                     
                     state_str = f"[Lv:{lvl} {b_on}{d_on}{e_on}{m_on}{comp_on}]"
-                    print(f"[Profiling]{state_str} 擷取:{c_cap:5.1f}ms | 運算:{c_comp:5.1f}ms | 渲染:{c_ui:5.1f}ms | 總計:{c_total:5.1f}ms")
+                    print(f"[Profiling]{state_str} Cap:{c_cap:5.1f}ms | Calc:{c_comp:5.1f}ms | Render:{c_ui:5.1f}ms | Total:{c_total:5.1f}ms")
 
             # 自動平衡邏輯
             if self._auto_balance_pending:

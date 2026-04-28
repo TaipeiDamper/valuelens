@@ -27,6 +27,7 @@ class ImageModeDialog(QDialog):
         dither_enabled: bool = False, dither_strength: int = 0,
         process_order: list[str] = ("blur", "dither", "edge", "morph"),
         morph_enabled: bool = False, morph_strength: int = 1,
+        morph_threshold: int = 35,
         parent=None
     ) -> None:
         super().__init__(parent)
@@ -44,6 +45,7 @@ class ImageModeDialog(QDialog):
         self.process_order = list(process_order)
         self.morph_enabled = morph_enabled
         self.morph_strength = morph_strength
+        self.morph_threshold = morph_threshold
 
         self._source: Optional[np.ndarray] = None
         self._result: Optional[np.ndarray] = None
@@ -91,6 +93,7 @@ class ImageModeDialog(QDialog):
         dither_enabled: bool = False, dither_strength: int = 0,
         process_order: list[str] = ("blur", "dither", "edge", "morph"),
         morph_enabled: bool = False, morph_strength: int = 1,
+        morph_threshold: int = 35,
     ) -> None:
         self.levels = levels
         self.min_value = min_value
@@ -103,6 +106,7 @@ class ImageModeDialog(QDialog):
         self.process_order = list(process_order)
         self.morph_enabled = morph_enabled
         self.morph_strength = morph_strength
+        self.morph_threshold = morph_threshold
 
     def open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -162,7 +166,8 @@ class ImageModeDialog(QDialog):
             dither_strength=eff_dither,
             process_order=self.process_order,
             morph_enabled=self.morph_enabled,
-            morph_strength=self.morph_strength
+            morph_strength=self.morph_strength,
+            morph_threshold=self.morph_threshold
         )
         self.preview.setPixmap(bgr_to_qpixmap(self._result).scaled(
             self.preview.size(),
