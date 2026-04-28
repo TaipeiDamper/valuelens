@@ -262,6 +262,10 @@ class OverlayWindow(QMainWindow):
 
     def _trigger_startup_auto_balance(self) -> None:
         """啟動時執行的自動平衡。"""
+        if getattr(self, '_last_gray_frame', None) is None or self._last_gray_frame.size == 0:
+            QTimer.singleShot(500, self._trigger_startup_auto_balance)
+            return
+            
         target = self.panel.balance_presets.currentData()
         if target:
             self.on_auto_balance_target_requested(target)
@@ -652,12 +656,14 @@ class OverlayWindow(QMainWindow):
         if source_gray is None or source_gray.size == 0:
             return
             
-        lower, upper, exp_value = self._optimize_balance_params(
+        from valuelens.core.balance import optimize_balance_params
+        lower, upper, exp_value = optimize_balance_params(
             source_gray,
             ratios,
             self.settings.min_value,
             self.settings.max_value,
             self.settings.exp_value,
+            self.settings.levels
         )
         
         # 參數平滑處理 (防止跳動)
@@ -681,6 +687,7 @@ class OverlayWindow(QMainWindow):
         if changed:
             self._apply_balance_to_ui(lower, upper, exp_value)
             self._last_frame_signature = None
+            self.request_refresh(16)
 
     def on_auto_continuous_toggled(self, enabled: bool) -> None:
         """切換持續自動平衡。"""
@@ -705,7 +712,8 @@ class OverlayWindow(QMainWindow):
             self._auto_continuous_enabled = False
             self.panel.auto_continuous_check.setChecked(False)
 
-        raw_wgb = self._levels_to_wgb(self._raw_distribution_pct)
+        from valuelens.core.balance import levels_to_wgb
+        raw_wgb = levels_to_wgb(self._raw_distribution_pct)
         target_wgb = self.panel.nearest_balance_preset(raw_wgb)
         self.panel.set_balance_preset(target_wgb, mark_best=True)
         self.on_auto_balance_target_requested(target_wgb)
@@ -1143,191 +1151,15 @@ class OverlayWindow(QMainWindow):
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
 
-    @staticmethod
-    def _calc_level_distribution(gray: np.ndarray | None, levels: int) -> list[float]:
-        level_count = max(2, int(levels))
-        if gray is None or gray.size == 0:
-            return [0.0] * level_count
-        scaled = np.floor(gray.astype(np.float32) * level_count / 256.0)
-        indices = np.clip(scaled, 0, level_count - 1).astype(np.int32)
-        counts = np.bincount(indices.reshape(-1), minlength=level_count).astype(np.float64)
-        total = float(counts.sum())
-        if total <= 0:
-            return [0.0] * level_count
-        return ((counts / total) * 100.0).tolist()
-
     def _update_distributions(
         self, raw_gray: np.ndarray | None, processed_indices: np.ndarray | None
     ) -> None:
+        from valuelens.core.balance import calc_level_distribution, calc_indices_distribution
         level_count = max(2, int(self.settings.levels))
-        self._raw_distribution_pct = self._calc_level_distribution(raw_gray, level_count)
-        self._processed_distribution_pct = self._calc_indices_distribution(
+        self._raw_distribution_pct = calc_level_distribution(raw_gray, level_count)
+        self._processed_distribution_pct = calc_indices_distribution(
             processed_indices, level_count
         )
-
-    @staticmethod
-    def _calc_indices_distribution(indices: np.ndarray | None, levels: int) -> list[float]:
-        level_count = max(2, int(levels))
-        if indices is None or indices.size == 0:
-            return [0.0] * level_count
-        native_dist = native_distribution_from_indices(indices, level_count)
-        if native_dist is not None and native_dist.size == level_count:
-            return native_dist.tolist()
-        clamped = np.clip(indices.astype(np.int32), 0, level_count - 1)
-        counts = np.bincount(clamped.reshape(-1), minlength=level_count).astype(np.float64)
-        total = float(counts.sum())
-        if total <= 0:
-            return [0.0] * level_count
-        return ((counts / total) * 100.0).tolist()
-
-
-    @staticmethod
-    def _levels_to_wgb(values: list[float]) -> tuple[float, float, float]:
-        """將 N 階層分佈折疊為 (white%, gray%, black%)。
-
-        重要：
-        - 根據使用者規則，此處 index 0 必須是最白 (White)，index n-1 必須是最黑 (Black)。
-        - 由於 quantize 輸出是 0=黑，因此我們在此先做 reversed。
-        """
-        # 反轉數據，使 v[0]=最白, v[n-1]=最黑
-        v = list(reversed(values))
-        n = len(v)
-
-        def _s(*idx):
-            """加總指定 index 的百分比。"""
-            return float(sum(v[i] for i in idx if 0 <= i < n))
-
-        def _best_dist(wgb, target_base):
-            """計算 wgb 與目標比例（如 0.7, 0.2, 0.1）所有排列的最小距離。"""
-            total = sum(wgb) or 1.0
-            norm = [val / total for val in wgb]
-            t_total = sum(target_base)
-            tn = [val / t_total for val in target_base]
-            best = float("inf")
-            for p in itertools.permutations(tn):
-                d = sum((norm[i] - p[i])**2 for i in range(3))
-                if d < best:
-                    best = d
-            return best
-
-        if n == 2:
-            # 二分法：白=[0], 黑=[1]。基準比例 3:7 (0.3, 0.7)
-            return (_s(0), 0.0, _s(1))
-
-        if n == 3:
-            # 三分法：白=[0], 灰=[1], 黑=[2]。基準比例 7:2:1
-            return (_s(0), _s(1), _s(2))
-
-        if n == 5:
-            # 方案 A: [0,1]|[2,3]|[4] ; 方案 B: [0]|[1,2]|[3,4]
-            target = (0.7, 0.2, 0.1)
-            a = (_s(0, 1), _s(2, 3), _s(4))
-            b = (_s(0),    _s(1, 2), _s(3, 4))
-            return a if _best_dist(a, target) <= _best_dist(b, target) else b
-
-        if n == 8:
-            # 方案 A: [0,1]|[2,3,4]|[5,6,7] ; 方案 B: [0,1,2]|[3,4,5]|[6,7]
-            target = (0.7, 0.2, 0.1)
-            a = (_s(0, 1),    _s(2, 3, 4), _s(5, 6, 7))
-            b = (_s(0, 1, 2), _s(3, 4, 5), _s(6, 7))
-            return a if _best_dist(a, target) <= _best_dist(b, target) else b
-
-        # 其他 n 值：均等三分
-        edges = np.linspace(0, n, 4, dtype=np.float64)
-        e1, e2 = int(np.floor(edges[1])), int(np.floor(edges[2]))
-        return (_s(*range(0, e1)), _s(*range(e1, e2)), _s(*range(e2, n)))
-
-    def _optimize_balance_params(
-        self,
-        gray: np.ndarray,
-        target: tuple[float, float, float], # (White, Gray, Black)
-        current_min: int,
-        current_max: int,
-        current_exp: float,
-    ) -> tuple[int, int, float]:
-        # 1. 取得直方圖
-        hist = np.bincount(gray.reshape(-1).astype(np.uint8), minlength=256).astype(np.float64)
-        total = float(hist.sum())
-        if total <= 0: return current_min, current_max, current_exp
-
-        # 2. 計算 CDF (累積分布)
-        cdf = np.cumsum(hist) / total
-        
-        t_white, t_gray, t_black = target
-        t_total = t_white + t_gray + t_black
-        if t_total <= 0: return current_min, current_max, current_exp
-        
-        # 3. 百分位數預測 (直方圖 0=黑, 255=白)
-        pct_black = t_black / t_total
-        pct_not_white = (t_black + t_gray) / t_total if t_gray > 0 else (1.0 - t_white / t_total)
-        
-        def find_val(p):
-            # p 必須在 [0, 1] 之間
-            return int(np.searchsorted(cdf, max(0.0, min(1.0, p))))
-
-        guess_min = find_val(pct_black)
-        guess_max = find_val(pct_not_white)
-        
-        # 4. 增加採樣密度與範圍
-        # 搜尋範圍為 +/- 12% 的人口比例，採樣 13 個點
-        p_samples = np.linspace(-0.12, 0.12, 13) 
-        
-        lo_candidates = sorted(list(set([find_val(pct_black + s) for s in p_samples] + [guess_min])))
-        hi_candidates = sorted(list(set([find_val(pct_not_white + s) for s in p_samples] + [guess_max])))
-        # Exp 搜尋點位增加到 25 個點，覆蓋更細膩的曲線
-        exp_range = np.linspace(-1.5, 1.5, 25)
-
-        best_loss = float('inf')
-        best_params = (current_min, current_max, current_exp)
-        levels = max(2, int(self.settings.levels))
-        target_ratios = np.array([t_black, t_gray, t_white]) / t_total
-        
-        for lo in lo_candidates:
-            if lo > 240: continue
-            for hi in hi_candidates:
-                if hi <= lo + 4: continue
-                if hi > 255: continue
-                # 加速：如果這組 lo/hi 離預測太遠則跳過？(目前維持全搜尋以獲取最佳解)
-                for ex in exp_range:
-                    r_now = self._distribution_from_hist(hist, lo, hi, levels, float(ex))
-                    diff = r_now - target_ratios
-                    l = float(np.dot(diff, diff))
-                    if l < best_loss:
-                        best_loss = l
-                        best_params = (lo, hi, float(ex))
-                        
-        return best_params
-
-    @staticmethod
-    def _distribution_from_hist(
-        hist: np.ndarray, lower: int, upper: int, levels: int, exp_value: float
-    ) -> np.ndarray:
-        levels = max(2, int(levels))
-        lower = max(0, min(254, int(lower)))
-        upper = max(lower + 1, min(255, int(upper)))
-        values = np.arange(256, dtype=np.float64)
-        clipped = np.clip(values, lower, upper)
-        normalized = (clipped - float(lower)) / float(upper - lower)
-        gamma = float(np.power(2.0, float(exp_value)))
-        mapped = np.power(normalized, gamma)
-        indices = np.floor(mapped * levels)
-        indices = np.clip(indices, 0, levels - 1).astype(np.int32)
-        counts = np.bincount(indices, weights=hist, minlength=levels).astype(np.float64)
-        total = float(counts.sum())
-        if total <= 0:
-            return np.zeros(3, dtype=np.float64)
-        
-        if levels == 2:
-            # 特殊處理 n=2：[0]是黑, [1]是白，沒有灰
-            return np.array([counts[0]/total, 0.0, counts[1]/total], dtype=np.float64)
-
-        level_edges = np.linspace(0, levels, 4, dtype=np.float64)
-        edge1 = int(np.floor(level_edges[1]))
-        edge2 = int(np.floor(level_edges[2]))
-        low = float(np.sum(counts[:edge1]) / total)
-        mid = float(np.sum(counts[edge1:edge2]) / total)
-        high = float(np.sum(counts[edge2:]) / total)
-        return np.array([low, mid, high], dtype=np.float64)
 
     def _draw_distribution_overlay(
         self, painter: QPainter, rect: QRect, values: list[float], title: str
