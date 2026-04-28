@@ -255,10 +255,18 @@ class OverlayWindow(QMainWindow):
 
         # 啟動時跑一次自動平衡
         self.panel.sync_from_settings(self.settings)
-        QTimer.singleShot(500, self.on_auto_balance_raw_requested)
+        QTimer.singleShot(500, self._trigger_startup_auto_balance)
 
         self.show()
         self.request_refresh()
+
+    def _trigger_startup_auto_balance(self) -> None:
+        """啟動時執行的自動平衡。"""
+        target = self.panel.balance_presets.currentData()
+        if target:
+            self.on_auto_balance_target_requested(target)
+        else:
+            self.on_auto_balance_raw_requested()
 
     def _get_current_raw_frame(self) -> np.ndarray | None:
         if hasattr(self, '_last_raw_bgr_frame'):
@@ -838,6 +846,7 @@ class OverlayWindow(QMainWindow):
         self._is_refreshing = True
         try:
             t_start = time.perf_counter()
+            t_captured = t_start
             # 1. 座標與參數準備
             rect = self._lens_rect()
             if rect.width() <= 0 or rect.height() <= 0: return
