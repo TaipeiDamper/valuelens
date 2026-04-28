@@ -569,10 +569,19 @@ class OverlayWindow(QMainWindow):
         if source_gray is None or source_gray.size == 0:
             return
             
+        # 自動模式下，使用井字網格像素點進行快速尋優
+        if self._auto_continuous_enabled:
+            eval_data = self.scene_detector.extract_grid_pixels(source_gray)
+        else:
+            eval_data = source_gray
+            
+        if eval_data.size == 0:
+            return
+
         hysteresis_val = 0.005 if self._auto_continuous_enabled else 0.0
         
         self.auto_balance_worker.request_balance(
-            source_gray,
+            eval_data,
             ratios,
             self.settings.min_value,
             self.settings.max_value,
@@ -1002,7 +1011,14 @@ class OverlayWindow(QMainWindow):
     ) -> None:
         from valuelens.core.balance import calc_level_distribution, calc_indices_distribution
         level_count = max(2, int(self.settings.levels))
-        self._raw_distribution_pct = calc_level_distribution(raw_gray, level_count)
+        
+        # 自動模式下白灰黑比例統計僅使用網格線抽樣
+        if self._auto_continuous_enabled and raw_gray is not None:
+            eval_data = self.scene_detector.extract_grid_pixels(raw_gray)
+            self._raw_distribution_pct = calc_level_distribution(eval_data, level_count)
+        else:
+            self._raw_distribution_pct = calc_level_distribution(raw_gray, level_count)
+            
         self._processed_distribution_pct = calc_indices_distribution(
             processed_indices, level_count
         )
