@@ -125,7 +125,7 @@ QSlider::handle:horizontal:hover {
 class ControlPanel(QWidget):
     settings_changed = Signal(int, int, int, float)
     display_settings_changed = Signal(int, int, float)
-    effect_settings_changed = Signal(bool, int, bool, int, bool)
+    effect_settings_changed = Signal(bool, int, bool, int)
     collapse_toggled = Signal(bool)
     compare_mode_changed = Signal(bool)
     hotkey_changed = Signal(str)

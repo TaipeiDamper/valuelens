@@ -94,128 +94,6 @@ def native_distribution_from_indices(indices: np.ndarray, levels: int) -> np.nda
     except Exception:
         return None
 
-# =====================================================================
-# 【DEPRECATED - 舊版重複部分，待刪除】
-# =====================================================================
-def quantize_gray_with_indices(
-    bgr: np.ndarray,
-    levels: int,
-    min_value: int = 0,
-    max_value: int = 255,
-    exp_value: float = 0.0,
-    display_min: int | None = None,
-    display_max: int | None = None,
-    display_exp: float | None = None,
-    blur_radius: int = 0,
-    dither_strength: int = 0,
-    edge_strength: int = 0,
-    process_order: list[str] = ("blur", "dither", "edge", "morph"),
-    morph_enabled: bool = False,
-    morph_strength: int = 1,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-    levels = max(2, int(levels))
-
-    # Native fast path covers baseline quantization only (no additional effects).
-    can_use_native = (
-        _native_quant is not None
-        and blur_radius <= 0
-        and dither_strength <= 0
-        and edge_strength <= 0
-        and (not morph_enabled or morph_strength <= 0)
-        and bgr.dtype == np.uint8
-        and bgr.ndim == 3
-        and bgr.shape[2] >= 3
-    )
-    if can_use_native:
-        try:
-            d_min = display_min if display_min is not None else 0
-            d_max = display_max if display_max is not None else 255
-            d_exp = display_exp if display_exp is not None else 0
-            out_gray, indices = _native_quant.quantize_fast(
-                np.ascontiguousarray(bgr),
-                levels,
-                int(min_value),
-                int(max_value),
-                float(exp_value),
-                int(d_min),
-                int(d_max),
-                float(d_exp),
-            )
-            return (
-                np.asarray(out_gray, dtype=np.uint8),
-                np.asarray(indices, dtype=np.int32),
-                None,
-            )
-        except Exception:
-            # Any native failure should gracefully fallback to Python/OpenCV path.
-            pass
-    
-    # --- Stage 1: Core Quantization ---
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    
-    # We maintain two versions: 
-    # - working_gray: used for final color/indices (can be dithered)
-    # - structure_gray: used for edge/morph detection (always clean)
-    working_gray = gray
-    structure_gray = gray
-    
-    indices = None
-    edges = None
-    morph_mask = None
-
-    def apply_quantization(img_gray):
-        lut = get_quantization_lut(levels, min_value, max_value, exp_value)
-        idx = cv2.LUT(img_gray, lut)
-        return idx.astype(np.int32)
-
-    # Execute Modular Pipeline
-    for step in process_order:
-        if step == "blur" and blur_radius > 0:
-            # Blur applies to both
-            working_gray = apply_bilateral(working_gray, blur_radius)
-            structure_gray = working_gray
-        elif step == "dither" and dither_strength > 0:
-            # Dither ONLY applies to working_gray
-            working_gray = apply_ordered_dither(working_gray)
-            indices = apply_quantization(working_gray)
-        elif step == "edge" and edge_strength > 0:
-            # Edges should use structure_gray or clean indices to avoid dither noise
-            if indices is not None:
-                # If dither was first, indices has noise. We use structure_gray instead or re-calc clean indices
-                clean_indices = apply_quantization(structure_gray)
-                edge_input = (clean_indices * (255 // (levels - 1))).astype(np.uint8)
-            else:
-                edge_input = structure_gray
-            t1 = max(1, int(255 - edge_strength * 2.54))
-            t2 = t1 * 2
-            edges = cv2.Canny(edge_input, t1, t2)
-        elif step == "morph" and morph_enabled and morph_strength > 0:
-            # Morph ALWAYS uses structure_gray to avoid dither noise
-            k_size = morph_strength * 2 + 1
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
-            morph_grad = cv2.morphologyEx(structure_gray, cv2.MORPH_GRADIENT, kernel)
-            # Use a slightly higher threshold for morph to be cleaner
-            morph_mask = morph_grad > 35
-
-    if indices is None:
-        indices = apply_quantization(working_gray)
-
-    # --- Stage 2: Display Mapping ---
-    d_min = display_min if display_min is not None else 0
-    d_max = display_max if display_max is not None else 255
-    d_exp = display_exp if display_exp is not None else 0
-    
-    norm = indices.astype(np.float32) / (levels - 1)
-    if d_exp != 0:
-        gamma_display = float(np.power(2.0, float(d_exp)))
-        norm = np.power(norm, gamma_display)
-    out = (norm * (d_max - d_min) + d_min).astype(np.uint8)
-    
-    if morph_mask is not None:
-        out[morph_mask] = 0
-        
-    return out, indices, edges
-
 def quantize_gray(
     bgr: np.ndarray,
     levels: int,
@@ -233,7 +111,7 @@ def quantize_gray(
     morph_strength: int = 1,
     morph_threshold: int = 35,
 ) -> np.ndarray:
-    out_gray, _, _ = quantize_gray_with_indices_v2(
+    out_gray, _, _ = quantize_gray_with_indices(
         bgr, levels, min_value, max_value, exp_value,
         display_min=display_min,
         display_max=display_max,
@@ -314,7 +192,7 @@ class MorphFilter(BaseFilter):
             ctx.morph_mask = morph_grad > threshold
 
 
-def quantize_gray_with_indices_v2(
+def quantize_gray_with_indices(
     bgr: np.ndarray,
     levels: int,
     min_value: int = 0,
@@ -331,7 +209,7 @@ def quantize_gray_with_indices_v2(
     morph_strength: int = 1,
     morph_threshold: int = 35,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-    """V2 雙軌並行測試入口點。"""
+    """模組化影像濾鏡與量化入口點。"""
     levels = max(2, int(levels))
     ctx = FilterContext(bgr, levels, min_value, max_value, exp_value)
     

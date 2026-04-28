@@ -17,7 +17,7 @@ from valuelens.config.settings import AppSettings, SettingsManager
 from valuelens.core.capture_service import CaptureService
 from valuelens.core.hotkey_service import HotkeyService
 from valuelens.core.qt_image import bgr_to_qimage, gray_to_qimage, qimage_to_bgr
-from valuelens.core.quantize import native_distribution_from_indices, quantize_gray, quantize_gray_with_indices, quantize_gray_with_indices_v2
+from valuelens.core.quantize import native_distribution_from_indices, quantize_gray, quantize_gray_with_indices
 from valuelens.modes.image_mode import ImageModeDialog
 from valuelens.ui.control_panel import ControlPanel
 from valuelens.ui.mirror_window import MirrorWindow
@@ -524,7 +524,7 @@ class OverlayWindow(QMainWindow):
         self._last_frame_signature = None
         self.request_refresh(16)
 
-    def on_morph_settings_changed(self, enabled: bool, strength: int, threshold: int) -> None:
+    def on_morph_settings_changed(self, enabled: bool, strength: int, threshold: int = 35) -> None:
         self.settings.morph_enabled = enabled
         self.settings.morph_strength = strength
         self.settings.morph_threshold = threshold
@@ -887,7 +887,7 @@ class OverlayWindow(QMainWindow):
                 eff_dither = self.settings.dither_strength if self.settings.dither_enabled else 0
                 eff_edge = self.settings.edge_strength if self.settings.edge_enabled else 0
                 
-                logic_quantized, logic_indices, edges = quantize_gray_with_indices_v2(
+                logic_quantized, logic_indices, edges = quantize_gray_with_indices(
                     frame,
                     self.settings.levels,
                     self.settings.min_value,
@@ -1367,7 +1367,8 @@ class OverlayWindow(QMainWindow):
         current_presets = self.settings.presets
         current_geom = (self.settings.x, self.settings.y, self.settings.width, self.settings.height)
         
-        merged = {**defaults, **data}
+        valid_data = {k: v for k, v in data.items() if k in defaults}
+        merged = {**defaults, **valid_data}
         merged["presets"] = current_presets
         merged["x"], merged["y"], merged["width"], merged["height"] = current_geom
         
@@ -1378,7 +1379,7 @@ class OverlayWindow(QMainWindow):
         self.on_display_settings_changed(self.settings.display_min_value, self.settings.display_max_value, self.settings.display_exp_value)
         self.on_effect_settings_changed(self.settings.blur_enabled, self.settings.blur_radius, self.settings.dither_enabled, self.settings.dither_strength)
         self.on_edge_settings_changed(self.settings.edge_enabled, self.settings.edge_strength, self.settings.edge_mix)
-        self.on_morph_settings_changed(self.settings.morph_enabled, self.settings.morph_strength)
+        self.on_morph_settings_changed(self.settings.morph_enabled, self.settings.morph_strength, self.settings.morph_threshold)
         self.on_order_changed(self.settings.process_order)
 
     def on_clear_preset(self, index: int) -> None:
