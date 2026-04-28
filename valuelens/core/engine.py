@@ -1,6 +1,6 @@
 import time
 import numpy as np
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, QMutex, QWaitCondition
 
 from valuelens.core.quantize import quantize_gray_with_indices
 from valuelens.config.settings import AppSettings
@@ -12,33 +12,49 @@ class ImageProcessWorker(QThread):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.mutex = QMutex()
+        self.cond = QWaitCondition()
         self._busy = False
         self._pending_task = None
         self._is_stopping = False
+        self.start()  # 啟動並進入休眠等待
 
     def is_busy(self) -> bool:
         return self._busy
 
     def process_frame(self, frame: np.ndarray, settings: AppSettings) -> None:
         """排程一個運算任務，若目前在忙則直接覆蓋暫存任務(永遠只算最新的一張)。"""
-        if self._is_stopping:
-            return
-        self._pending_task = (frame, settings)
-        if not self.isRunning():
-            self.start()
+        self.mutex.lock()
+        if not self._is_stopping:
+            self._pending_task = (frame, settings)
+            self.cond.wakeOne()
+        self.mutex.unlock()
 
     def stop(self) -> None:
         """優雅且安全地終止執行緒。"""
+        self.mutex.lock()
         self._is_stopping = True
-        self._pending_task = None
+        self.cond.wakeOne()
+        self.mutex.unlock()
         self.quit()
-        self.wait(1000)
+        self.wait(2000)
 
     def run(self) -> None:
-        while self._pending_task is not None and not self._is_stopping:
-            self._busy = True
-            frame, settings = self._pending_task
+        while True:
+            self.mutex.lock()
+            while self._pending_task is None and not self._is_stopping:
+                self.cond.wait(self.mutex)
+                
+            if self._is_stopping:
+                self.mutex.unlock()
+                break
+                
+            task = self._pending_task
             self._pending_task = None
+            self.mutex.unlock()
+            
+            self._busy = True
+            frame, settings = task
             
             t_start = time.perf_counter()
             

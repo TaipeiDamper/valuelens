@@ -765,6 +765,10 @@ class OverlayWindow(QMainWindow):
         self._coalesce_timer.stop()
         if hasattr(self, "calc_worker"):
             self.calc_worker.stop()
+        if getattr(self, "_mirror_window", None) is not None:
+            self._mirror_window.close()
+        if hasattr(self, "hotkeys"):
+            self.hotkeys.shutdown()
         event.accept()
 
     def refresh_frame(self) -> None:
