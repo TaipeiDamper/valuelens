@@ -18,7 +18,7 @@ from valuelens.core.capture_service import CaptureService
 from valuelens.core.hotkey_service import HotkeyService
 from valuelens.core.qt_image import bgr_to_qimage, gray_to_qimage, qimage_to_bgr
 from valuelens.core.quantize import native_distribution_from_indices, quantize_gray, quantize_gray_with_indices
-from valuelens.core.engine import ImageProcessWorker
+from valuelens.core.engine import ImageProcessWorker, AutoBalanceWorker
 from valuelens.core.sources import LiveScreenSource, StaticImageSource, FrameContext
 from valuelens.modes.image_mode import ImageModeDialog
 from valuelens.ui.control_panel import ControlPanel
@@ -62,6 +62,10 @@ class OverlayWindow(QMainWindow):
         
         self.calc_worker = ImageProcessWorker(self)
         self.calc_worker.finished.connect(self._on_calc_finished)
+        
+        self.auto_balance_worker = AutoBalanceWorker(self)
+        self.auto_balance_worker.finished.connect(self._on_auto_balance_finished)
+        
         self.image_mode = ImageModeDialog(settings=self.settings, parent=self)
         self.image_mode.set_import_callback(self._get_current_raw_frame)
 
@@ -551,7 +555,9 @@ class OverlayWindow(QMainWindow):
         # 同步更新本地設定
         self.store.update(min_value=lower, max_value=upper, exp_value=exp_value)
     def on_auto_balance_target_requested(self, ratios: tuple[float, float, float]) -> None:
-        # 決定計算來源：是當前可見的 viewport 還是整張圖片
+        if self.auto_balance_worker.is_busy():
+            return
+            
         source_gray = self._last_gray_frame
         if self._is_static_mode and self._use_global_calc and self._full_image_gray is not None:
             source_gray = self._full_image_gray
@@ -559,21 +565,19 @@ class OverlayWindow(QMainWindow):
         if source_gray is None or source_gray.size == 0:
             return
             
-        from valuelens.core.balance import optimize_balance_params
-        # 防震盪：持續平衡模式下，給予目前參數「主場優勢」，避免在兩個相近的最佳解之間反覆橫跳
         hysteresis_val = 0.005 if self._auto_continuous_enabled else 0.0
         
-        lower, upper, exp_value = optimize_balance_params(
+        self.auto_balance_worker.request_balance(
             source_gray,
             ratios,
             self.settings.min_value,
             self.settings.max_value,
             self.settings.exp_value,
             self.settings.levels,
-            hysteresis=hysteresis_val
+            hysteresis_val
         )
-        
-        # 參數平滑處理 (防止跳動)
+
+    def _on_auto_balance_finished(self, lower: int, upper: int, exp_value: float) -> None:
         def smooth_and_clamp(new, old, alpha=0.3, max_step=None):
             diff = new - old
             if abs(diff) < 0.5: return old
@@ -583,7 +587,6 @@ class OverlayWindow(QMainWindow):
             return old + step
 
         if self._auto_continuous_enabled:
-            # 持續模式下使用平滑，放寬最大步長避免手感 Lag，利用 hysteresis 防震盪即可
             lower = int(round(smooth_and_clamp(lower, self.settings.min_value, 0.5, max_step=30)))
             upper = int(round(smooth_and_clamp(upper, self.settings.max_value, 0.5, max_step=30)))
             exp_value = smooth_and_clamp(exp_value, self.settings.exp_value, 0.4, max_step=0.5)
@@ -765,6 +768,8 @@ class OverlayWindow(QMainWindow):
         self._coalesce_timer.stop()
         if hasattr(self, "calc_worker"):
             self.calc_worker.stop()
+        if hasattr(self, "auto_balance_worker"):
+            self.auto_balance_worker.stop()
         if hasattr(self, "image_mode") and self.image_mode is not None:
             self.image_mode.close()
         if getattr(self, "_mirror_window", None) is not None:

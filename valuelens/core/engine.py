@@ -3,7 +3,62 @@ import numpy as np
 from PySide6.QtCore import QThread, Signal, QMutex, QWaitCondition
 
 from valuelens.core.quantize import quantize_gray_with_indices
+from valuelens.core.balance import optimize_balance_params
 from valuelens.config.settings import AppSettings
+
+class AutoBalanceWorker(QThread):
+    finished = Signal(int, int, float)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.mutex = QMutex()
+        self.cond = QWaitCondition()
+        self._busy = False
+        self._pending_task = None
+        self._is_stopping = False
+        self.start()
+
+    def is_busy(self) -> bool:
+        return self._busy
+
+    def request_balance(self, gray_frame: np.ndarray, target: tuple, current_min: int, current_max: int, current_exp: float, levels_count: int, hysteresis: float) -> None:
+        self.mutex.lock()
+        if not self._is_stopping:
+            self._pending_task = (gray_frame, target, current_min, current_max, current_exp, levels_count, hysteresis)
+            self.cond.wakeOne()
+        self.mutex.unlock()
+
+    def stop(self) -> None:
+        self.mutex.lock()
+        self._is_stopping = True
+        self.cond.wakeOne()
+        self.mutex.unlock()
+        self.quit()
+        self.wait(2000)
+
+    def run(self) -> None:
+        while True:
+            self.mutex.lock()
+            while self._pending_task is None and not self._is_stopping:
+                self.cond.wait(self.mutex)
+                
+            if self._is_stopping:
+                self.mutex.unlock()
+                break
+                
+            task = self._pending_task
+            self._pending_task = None
+            self.mutex.unlock()
+            
+            self._busy = True
+            gray_frame, target, current_min, current_max, current_exp, levels_count, hysteresis = task
+            
+            best_params = optimize_balance_params(
+                gray_frame, target, current_min, current_max, current_exp, levels_count, hysteresis
+            )
+            
+            self.finished.emit(best_params[0], best_params[1], best_params[2])
+            self._busy = False
 
 class ImageProcessWorker(QThread):
     """背景影像處理運算執行緒，負責執行耗時的 quantize_gray_with_indices。"""
