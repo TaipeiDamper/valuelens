@@ -112,55 +112,75 @@ def optimize_balance_params(
     levels_count: int,
     hysteresis: float = 0.0
 ) -> tuple[int, int, float]:
-    """全自動分析最佳平衡參數的核心算法"""
+    """全自動分析最佳平衡參數的核心算法 - 多解析度階層搜尋 (Multi-resolution Search)"""
+    
+    # 記錄呼叫次數，用於定期「強制校正與抖動探索」
+    optimize_balance_params._call_count = getattr(optimize_balance_params, '_call_count', 0) + 1
+    force_recalibrate = (optimize_balance_params._call_count % 15 == 0)
+    
     hist = np.bincount(gray.reshape(-1).astype(np.uint8), minlength=256).astype(np.float64)
     total = float(hist.sum())
     if total <= 0: return current_min, current_max, current_exp
 
-    cdf = np.cumsum(hist) / total
-    
+    levels = max(2, int(levels_count))
     t_white, t_gray, t_black = target
     t_total = t_white + t_gray + t_black
     if t_total <= 0: return current_min, current_max, current_exp
     
-    pct_black = t_black / t_total
-    pct_not_white = (t_black + t_gray) / t_total if t_gray > 0 else (1.0 - t_white / t_total)
-    
-    def find_val(p):
-        return int(np.searchsorted(cdf, max(0.0, min(1.0, p))))
-
-    guess_min = find_val(pct_black)
-    guess_max = find_val(pct_not_white)
-    
-    # --- 方案 B: 自適應動態搜尋步長 (防止局部鞍點卡死) ---
-    if abs(current_max - current_min) < 25:
-        p_samples = np.linspace(-0.45, 0.45, 31) 
-        exp_range = np.linspace(-2.0, 2.0, 35)
-    else:
-        p_samples = np.linspace(-0.12, 0.12, 13) 
-        exp_range = np.linspace(-1.5, 1.5, 25)
-        
-    lo_candidates = sorted(list(set([find_val(pct_black + s) for s in p_samples] + [guess_min])))
-    hi_candidates = sorted(list(set([find_val(pct_not_white + s) for s in p_samples] + [guess_max])))
-
-    levels = max(2, int(levels_count))
     target_ratios = np.array([t_black, t_gray, t_white]) / t_total
     
-    # 評估目前參數的 Loss (主場優勢/防震盪)
+    # 評估目前參數的 Loss (防震盪)
     current_dist = distribution_from_hist(hist, current_min, current_max, levels, current_exp)
     diff_curr = current_dist - target_ratios
     current_loss = float(np.dot(diff_curr, diff_curr))
     
-    best_loss = current_loss - hysteresis
+    # 定期校正時不使用主場優勢 (hysteresis=0)，確保隨時都有機會逃離局部最佳解
+    eff_hysteresis = 0.0 if force_recalibrate else hysteresis
+    best_loss = current_loss - eff_hysteresis
     best_params = (current_min, current_max, current_exp)
+
+    # --- 階段一：粗算 (Coarse Search) ---
+    # 鋪設覆蓋全域的稀疏網格
+    lo_coarse = np.linspace(0, 240, 12, dtype=int)
+    hi_coarse = np.linspace(10, 255, 12, dtype=int)
+    ex_coarse = np.linspace(-2.0, 2.0, 12)
     
+    coarse_best_params = best_params
+    coarse_best_loss = best_loss
     
-    for lo in lo_candidates:
+    for lo in lo_coarse:
         if lo > 240: continue
-        for hi in hi_candidates:
+        for hi in hi_coarse:
             if hi <= lo + 4: continue
             if hi > 255: continue
-            for ex in exp_range:
+            for ex in ex_coarse:
+                r_now = distribution_from_hist(hist, lo, hi, levels, float(ex))
+                diff = r_now - target_ratios
+                l = float(np.dot(diff, diff))
+                if l < coarse_best_loss:
+                    coarse_best_loss = l
+                    coarse_best_params = (lo, hi, float(ex))
+
+    # --- 階段二：精算 (Fine Search) ---
+    # 圍繞粗算結果鋪設精細的網格
+    c_lo, c_hi, c_ex = coarse_best_params
+    
+    # 定期校正時，故意給參數微小的隨機抖動 (Nudge)，打破對稱性以探索邊緣極限
+    if force_recalibrate:
+        c_lo = max(0, min(240, c_lo + int(np.random.randint(-6, 7))))
+        c_hi = max(c_lo + 5, min(255, c_hi + int(np.random.randint(-6, 7))))
+        c_ex = max(-2.0, min(2.0, c_ex + float(np.random.uniform(-0.25, 0.25))))
+
+    lo_fine = np.linspace(max(0, c_lo - 24), min(240, c_lo + 24), 10, dtype=int)
+    hi_fine = np.linspace(max(c_lo + 5, c_hi - 24), min(255, c_hi + 24), 10, dtype=int)
+    ex_fine = np.linspace(max(-2.0, c_ex - 0.4), min(2.0, c_ex + 0.4), 10)
+
+    for lo in lo_fine:
+        if lo > 240: continue
+        for hi in hi_fine:
+            if hi <= lo + 4: continue
+            if hi > 255: continue
+            for ex in ex_fine:
                 r_now = distribution_from_hist(hist, lo, hi, levels, float(ex))
                 diff = r_now - target_ratios
                 l = float(np.dot(diff, diff))
