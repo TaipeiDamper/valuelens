@@ -29,14 +29,17 @@ class IFrameSource(ABC):
         """是否為靜態影像模式"""
         pass
         
+    # TODO: [CLEANUP] 目前無任何模組呼叫此平移方法，屬於架構預留。
     def pan(self, dx: float, dy: float) -> None:
         """平移畫面 (預設不處理)"""
         pass
         
+    # TODO: [CLEANUP] 目前無任何模組呼叫此縮放方法，屬於架構預留。
     def zoom(self, delta: float, pivot_x: float, pivot_y: float) -> None:
         """縮放畫面 (預設不處理)"""
         pass
         
+    # TODO: [CLEANUP] 目前無任何模組呼叫此重置方法，屬於架構預留。
     def reset_view(self) -> None:
         """重置縮放與平移 (預設不處理)"""
         pass
@@ -87,10 +90,12 @@ class StaticImageSource(IFrameSource):
     def is_static(self) -> bool:
         return True
         
+    # TODO: [CLEANUP] 目前無任何模組呼叫此平移方法，屬於架構預留。
     def pan(self, dx: float, dy: float) -> None:
         self.pan_offset_x += dx
         self.pan_offset_y += dy
         
+    # TODO: [CLEANUP] 目前無任何模組呼叫此縮放方法，屬於架構預留。
     def zoom(self, delta: float, pivot_x: float, pivot_y: float) -> None:
         old_zoom = self.zoom_factor
         self.zoom_factor *= delta
@@ -99,6 +104,7 @@ class StaticImageSource(IFrameSource):
         self.pan_offset_x = pivot_x - (pivot_x - self.pan_offset_x) * (self.zoom_factor / old_zoom)
         self.pan_offset_y = pivot_y - (pivot_y - self.pan_offset_y) * (self.zoom_factor / old_zoom)
         
+    # TODO: [CLEANUP] 目前無任何模組呼叫此重置方法，屬於架構預留。
     def reset_view(self) -> None:
         self.zoom_factor = 1.0
         self.pan_offset_x = 0.0
