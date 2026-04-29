@@ -102,14 +102,19 @@ QSlider::sub-page:horizontal {
     border-radius: 3px;
 }
 QSlider#blur_slider::sub-page:horizontal { background: #4CAF50; }
+QSlider#blur_slider::handle:horizontal { background: #4CAF50; }
+
 QSlider#dither_slider::sub-page:horizontal { background: #2196F3; }
-QSlider#edge_slider::sub-page:horizontal { background: #FF9800; }
-QSlider#edge_mix_slider::sub-page:horizontal { background: #FF9800; }
+QSlider#dither_slider::handle:horizontal { background: #2196F3; }
+
+QSlider#edge_slider::sub-page:horizontal, QSlider#edge_mix_slider::sub-page:horizontal { background: #FF9800; }
+QSlider#edge_slider::handle:horizontal, QSlider#edge_mix_slider::handle:horizontal { background: #FF9800; }
+
 QSlider#morph_slider::sub-page:horizontal, QSlider#morph_thresh_slider::sub-page:horizontal { background: #E91E63; }
+QSlider#morph_slider::handle:horizontal, QSlider#morph_thresh_slider::handle:horizontal { background: #E91E63; }
 
 QSlider::handle:horizontal {
-    background: #eee;
-    border: 1px solid #aaa;
+    border: 1px solid #fff;
     width: 18px;
     height: 18px;
     margin: -7px 0;
@@ -117,7 +122,6 @@ QSlider::handle:horizontal {
 }
 QSlider::handle:horizontal:hover {
     background: #fff;
-    border: 1px solid #2e7bf6;
 }
 """
 
@@ -205,6 +209,7 @@ class ControlPanel(QWidget):
         # 預設集子選單
         self.preset_menu = QMenu("預設集 (Presets)", self)
         self.update_presets_ui(settings.presets)
+        self.preset_menu.aboutToShow.connect(lambda: self.update_presets_ui(self.settings.presets))
         
         self.image_mode_action = QAction("圖片模式", self)
         self.hotkey_action = QAction(f"設定快捷鍵 ({settings.hotkey})", self)
@@ -1022,7 +1027,7 @@ class DraggableOrderWidget(QWidget):
         if is_on:
             color = QColor(self._colors[key])
         else:
-            color = QColor("#444")
+            color = QColor(self._colors[key]).darker(280)
             
         color.setAlpha(alpha)
         painter.setBrush(color)

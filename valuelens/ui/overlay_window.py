@@ -203,9 +203,10 @@ class OverlayWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         # 啟動時跑一次自動平衡
+        # --- 開機強行重置為空白面板 ---
+        self.panel._clear_all_settings()
         self.panel.sync_from_settings(self.settings)
-        QTimer.singleShot(500, self._trigger_startup_auto_balance)
-
+        
         self.show()
         self.request_refresh()
 
@@ -1133,13 +1134,17 @@ class OverlayWindow(QMainWindow):
             data = slot["data"]
             
         defaults = asdict(AppSettings())
-        # 保留目前的 presets 與視窗幾何
+        # 保留目前的 presets、自動暫存格與視窗幾何
         current_presets = self.settings.presets
+        current_last_state = self.settings.last_state
+        current_last_color = self.settings.last_color_state
         current_geom = (self.settings.x, self.settings.y, self.settings.width, self.settings.height)
         
         valid_data = {k: v for k, v in data.items() if k in defaults}
         merged = {**defaults, **valid_data}
         merged["presets"] = current_presets
+        merged["last_state"] = current_last_state
+        merged["last_color_state"] = current_last_color
         merged["x"], merged["y"], merged["width"], merged["height"] = current_geom
         
         for k, v in merged.items():
@@ -1368,13 +1373,17 @@ class OverlayWindow(QMainWindow):
         geom = self.geometry()
         from dataclasses import asdict
         current_dict = asdict(self.settings)
-        current_dict.update(x=geom.x(), y=geom.y(), width=geom.width(), height=geom.height())
         
+        # 排除遞迴欄位以防止序列化深度溢出
+        for key in ["presets", "startup_preset", "last_state", "last_color_state", "x", "y", "width", "height"]:
+            if key in current_dict:
+                del current_dict[key]
+                
         self.settings.last_state = current_dict
         if getattr(self.settings, 'custom_palette', []):
             self.settings.last_color_state = current_dict
             
-        self.store.save(self.settings)
+        self.store._manager.save(self.settings)
         
         # 停止背景更新機制與執行緒 (避免 QThread Leak)
         if hasattr(self, "timer"):

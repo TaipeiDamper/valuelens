@@ -101,18 +101,31 @@ class RenderWidget(QWidget):
             top = block_rect.top() + 1 + idx * row_h
             row_rect = QRect(block_rect.left() + 1, top, block_rect.width() - 2, row_h - 1)
             
+            # 計算本質灰階度
+            tone = int(round(((rows_count - 1 - idx) / max(1, rows_count - 1)) * 255))
+            orig_color = QColor(tone, tone, tone)
+            orig_text_color = Qt.GlobalColor.black if tone >= 128 else Qt.GlobalColor.white
+            
+            # 切割 A/B 區塊
+            swatch_w = 24
+            rect_a = QRect(row_rect.left(), row_rect.top(), row_rect.width() - swatch_w, row_rect.height())
+            rect_b = QRect(row_rect.left() + row_rect.width() - swatch_w, row_rect.top(), swatch_w, row_rect.height())
+            
+            # 繪製灰階主體
+            painter.fillRect(rect_a, orig_color)
+            painter.setPen(Qt.GlobalColor.white)
+            painter.drawRect(rect_a.adjusted(0, 0, -1, -1))
+            
+            painter.setPen(orig_text_color)
+            painter.drawText(rect_a, Qt.AlignmentFlag.AlignCenter, f"{pct:.1f}%")
+            
+            # 繪製右側染色格
             if self.custom_palette and len(self.custom_palette) == rows_count:
                 color_rgb = self.custom_palette[rows_count - 1 - idx]
                 fill_color = QColor(*color_rgb)
-                brightness = 0.299 * color_rgb[0] + 0.587 * color_rgb[1] + 0.114 * color_rgb[2]
-                text_color = Qt.GlobalColor.black if brightness >= 128 else Qt.GlobalColor.white
             else:
-                tone = int(round(((rows_count - 1 - idx) / max(1, rows_count - 1)) * 255))
-                fill_color = QColor(tone, tone, tone)
-                text_color = Qt.GlobalColor.black if tone >= 128 else Qt.GlobalColor.white
-            
-            painter.fillRect(row_rect, fill_color)
+                fill_color = orig_color
+                
+            painter.fillRect(rect_b, fill_color)
             painter.setPen(Qt.GlobalColor.white)
-            painter.drawRect(row_rect.adjusted(0, 0, -1, -1))
-            painter.setPen(text_color)
-            painter.drawText(row_rect, Qt.AlignmentFlag.AlignCenter, f"{pct:.1f}%")
+            painter.drawRect(rect_b.adjusted(0, 0, -1, -1))
