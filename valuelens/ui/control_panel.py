@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QMouseEvent, QPainter, QPaintEvent, QPainterPath
+from PySide6.QtGui import QAction, QColor, QMouseEvent, QPainter, QPaintEvent, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -413,7 +413,14 @@ class ControlPanel(QWidget):
         row2 = QHBoxLayout()
         row2.setContentsMargins(10, 2, 10, 2)
         row2.setSpacing(8)
-        row2.addWidget(QLabel("📥 輸入"))
+        
+        self.toggle_output_btn = QToolButton()
+        self.toggle_output_btn.setText("📥 輸入")
+        self.toggle_output_btn.setToolTip("點擊展開/收合輸出設定")
+        self.toggle_output_btn.clicked.connect(self._toggle_output_row)
+        self.toggle_output_btn.setStyleSheet("border: none; padding: 0px; margin: 0px; background: transparent; text-decoration: underline;")
+        
+        row2.addWidget(self.toggle_output_btn)
         row2.addWidget(self.range_slider, 1)
         self.logic_exp_label = QLabel("偏差")
         self.logic_exp_label.setFixedWidth(100)
@@ -425,32 +432,16 @@ class ControlPanel(QWidget):
         order_row.setContentsMargins(8, 2, 8, 2)
         order_row.addWidget(self.order_widget)
 
-        # 參數調整區域 (改用 GridLayout 以防炸掉)
-        params_grid = QGridLayout()
-        params_grid.setContentsMargins(8, 4, 8, 4)
-        params_grid.setSpacing(10)
-        params_grid.setHorizontalSpacing(30)
-        
-        params_grid.addWidget(QLabel("Blur"), 0, 0)
-        params_grid.addWidget(self.blur_slider, 0, 1)
-        params_grid.addWidget(QLabel("Dither"), 0, 2)
-        params_grid.addWidget(self.dither_slider, 0, 3)
-        params_grid.addWidget(QLabel("Morph"), 0, 4)
-        params_grid.addWidget(self.morph_slider, 0, 5)
-        
-        params_grid.addWidget(QLabel("Edge Strength"), 1, 0)
-        params_grid.addWidget(self.edge_slider, 1, 1)
-        params_grid.addWidget(QLabel("Edge Mix"), 1, 2)
-        params_grid.addWidget(self.edge_mix_slider, 1, 3)
-        params_grid.addWidget(QLabel("Morph Thresh"), 1, 4)
-        params_grid.addWidget(self.morph_thresh_slider, 1, 5)
-        
-        params_grid.setColumnStretch(1, 1)
-        params_grid.setColumnStretch(3, 1)
-        params_grid.setColumnStretch(5, 1)
+        # 參數調整區域：極致壓縮的一行式動態容器
+        self.slider_container = QWidget()
+        self.slider_layout = QHBoxLayout(self.slider_container)
+        self.slider_layout.setContentsMargins(8, 2, 8, 2)
+        self.slider_layout.setSpacing(16)
 
-        bottom_row = QHBoxLayout()
-        bottom_row.setContentsMargins(10, 2, 10, 6)
+        # 將輸出組包裝成可隱藏面板
+        self.output_row_widget = QWidget()
+        bottom_row = QHBoxLayout(self.output_row_widget)
+        bottom_row.setContentsMargins(10, 2, 10, 2)
         bottom_row.setSpacing(8)
         bottom_row.addWidget(QLabel("📤 輸出"))
         bottom_row.addWidget(self.display_range_slider, 1)
@@ -458,14 +449,14 @@ class ControlPanel(QWidget):
         self.display_exp_label.setFixedWidth(100)
         bottom_row.addWidget(self.display_exp_label)
         bottom_row.addWidget(self.display_exp_slider)
+        self.output_row_widget.setVisible(False) # 預設收合
 
         # 獨立的重置功能按鈕行
         btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(10, 4, 10, 6)
+        btn_row.setContentsMargins(10, 2, 10, 4)
         btn_row.setSpacing(12)
         btn_row.addStretch(1)
         
-        # 變更按鈕名稱以利對齊
         self.logic_reset_btn.setText("🔄重置輸入")
         self.display_reset_btn.setText("🔄重置輸出")
         
@@ -481,12 +472,12 @@ class ControlPanel(QWidget):
         extra_layout.setSpacing(0)
         extra_layout.addLayout(row2)
         extra_layout.addLayout(order_row)
-        extra_layout.addLayout(params_grid)
-        extra_layout.addLayout(bottom_row)
+        extra_layout.addWidget(self.slider_container)
+        extra_layout.addWidget(self.output_row_widget)
         extra_layout.addLayout(btn_row)
 
         layout = QVBoxLayout(self)
-        self.setFixedHeight(230) # 兩行參數後增加高度
+        self.setFixedHeight(165)
         self.setMinimumWidth(500) # 防止視窗縮太小導致 UI 完全崩潰
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -522,6 +513,9 @@ class ControlPanel(QWidget):
         self.save_startup_action.triggered.connect(self.save_startup_requested.emit)
         self.clear_startup_action.triggered.connect(self.clear_startup_requested.emit)
 
+        self.order_widget.filter_selected.connect(self._update_contextual_sliders)
+        self._update_contextual_sliders("blur")
+
     def _clear_palette(self) -> None:
         """清除自訂調色盤，回復灰階模式。"""
         self.settings.custom_palette = []
@@ -552,6 +546,16 @@ class ControlPanel(QWidget):
         self.sync_from_settings(s)
         self._emit_settings()
 
+    def _toggle_output_row(self) -> None:
+        """切換輸出參數滑桿那一列的顯示狀態。"""
+        is_visible = not self.output_row_widget.isVisible()
+        self.output_row_widget.setVisible(is_visible)
+        # 動態調整面板尺寸以節省縱向空間
+        if is_visible:
+            self.setFixedHeight(195)
+        else:
+            self.setFixedHeight(165)
+
     def _on_collapse_toggled(self, checked: bool) -> None:
         if checked:
             self.extra_container.hide()
@@ -559,9 +563,38 @@ class ControlPanel(QWidget):
             self.collapse_btn.setText("▼")
         else:
             self.extra_container.show()
-            self.setFixedHeight(230)
+            self.setFixedHeight(165)
             self.collapse_btn.setText("▲")
         self.collapse_toggled.emit(checked)
+
+    def _update_contextual_sliders(self, filter_name: str) -> None:
+        """動態更換下方對應演算法的滑桿元件。"""
+        # 1. 清理原有的佈局
+        while self.slider_layout.count():
+            item = self.slider_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                
+        # 2. 根據被點擊的濾鏡，動態載入滑桿
+        if filter_name == "blur":
+            self.slider_layout.addWidget(QLabel("Blur Radius"))
+            self.slider_layout.addWidget(self.blur_slider)
+        elif filter_name == "dither":
+            self.slider_layout.addWidget(QLabel("Dither Strength"))
+            self.slider_layout.addWidget(self.dither_slider)
+        elif filter_name == "edge":
+            self.slider_layout.addWidget(QLabel("Edge Strength"))
+            self.slider_layout.addWidget(self.edge_slider)
+            self.slider_layout.addWidget(QLabel("Edge Mix"))
+            self.slider_layout.addWidget(self.edge_mix_slider)
+        elif filter_name == "morph":
+            self.slider_layout.addWidget(QLabel("Morph Strength"))
+            self.slider_layout.addWidget(self.morph_slider)
+            self.slider_layout.addWidget(QLabel("Morph Thresh"))
+            self.slider_layout.addWidget(self.morph_thresh_slider)
+            
+        self.slider_container.update()
 
     def _on_levels_changed(self, index: int) -> None:
         lvl = _LEVEL_PRESETS[index]
@@ -975,10 +1008,12 @@ class DualHandleSlider(QWidget):
 class DraggableOrderWidget(QWidget):
     order_changed = Signal(list)
     toggle_requested = Signal(str, bool)
+    filter_selected = Signal(str)
 
     def __init__(self, order: list[str], states: dict[str, bool], parent=None) -> None:
         super().__init__(parent)
         self._order = list(order)
+        self._selected_filter = self._order[0] if self._order else "blur"
         self._states = dict(states)
         self._item_map = {
             "blur": "Blur",
@@ -993,8 +1028,10 @@ class DraggableOrderWidget(QWidget):
             "morph": "#E91E63"
         }
         self._active_idx = -1
+        self._clicked_idx = -1
         self._drag_x = 0
         self._has_dragged = False
+        self._press_pos = QPoint()
         self.setMinimumHeight(26)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1024,6 +1061,8 @@ class DraggableOrderWidget(QWidget):
 
     def _draw_item(self, painter, rect, key, alpha=255):
         is_on = self._states.get(key, True)
+        is_selected = (key == getattr(self, '_selected_filter', 'blur'))
+        
         if is_on:
             color = QColor(self._colors[key])
         else:
@@ -1031,45 +1070,76 @@ class DraggableOrderWidget(QWidget):
             
         color.setAlpha(alpha)
         painter.setBrush(color)
-        painter.setPen(Qt.PenStyle.NoPen)
+        
+        # 若被選取則畫上白色框線以供識別
+        if is_selected:
+            painter.setPen(QPen(QColor("#FFFFFF"), 1.5))
+        else:
+            painter.setPen(Qt.PenStyle.NoPen)
+            
         painter.drawRoundedRect(rect, 4, 4)
         
-        painter.setPen(QColor("white") if is_on else QColor("#888"))
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._item_map[key])
+        # 繪製左側燈號狀態區 (圓點標記)
+        indicator_rect = QRect(rect.left() + 8, rect.top() + (rect.height() - 10) // 2, 10, 10)
+        painter.setBrush(QColor("white") if is_on else QColor("#444444"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(indicator_rect)
+        
+        # 繪製右側文字標籤
+        text_rect = QRect(rect.left() + 24, rect.top(), rect.width() - 24, rect.height())
+        painter.setPen(QColor("white") if is_on else QColor("#888888"))
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._item_map[key])
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         pos = event.position().toPoint()
         rects = self._item_rects()
+        self._clicked_idx = -1
+        self._press_pos = pos
+        self._has_dragged = False
+        
         for i, r in enumerate(rects):
             if r.contains(pos):
-                self._active_idx = i
-                self._drag_x = pos.x()
-                self._has_dragged = False
-                self.update()
+                self._clicked_idx = i
                 break
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if self._active_idx == -1: return
-        self._drag_x = event.position().toPoint().x()
-        self._has_dragged = True
+        if self._clicked_idx == -1: return
+        pos = event.position().toPoint()
         
-        # Check for swap
-        w = self.width() // len(self._order)
-        new_idx = max(0, min(len(self._order)-1, self._drag_x // w))
-        if new_idx != self._active_idx:
-            item = self._order.pop(self._active_idx)
-            self._order.insert(new_idx, item)
-            self._active_idx = new_idx
-            self.order_changed.emit(self._order)
+        # 超過位移門檻才判定進入拖曳排序
+        if not self._has_dragged and (pos - self._press_pos).manhattanLength() > 6:
+            self._has_dragged = True
+            self._active_idx = self._clicked_idx
             
-        self.update()
+        if self._has_dragged:
+            self._drag_x = pos.x()
+            w = self.width() // len(self._order)
+            new_idx = max(0, min(len(self._order)-1, self._drag_x // w))
+            if new_idx != self._active_idx:
+                item = self._order.pop(self._active_idx)
+                self._order.insert(new_idx, item)
+                self._active_idx = new_idx
+                self.order_changed.emit(self._order)
+            self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if self._active_idx != -1 and not self._has_dragged:
-            key = self._order[self._active_idx]
-            new_state = not self._states.get(key, True)
-            self._states[key] = new_state
-            self.toggle_requested.emit(key, new_state)
+        if self._clicked_idx != -1 and not self._has_dragged:
+            key = self._order[self._clicked_idx]
+            rects = self._item_rects()
+            r = rects[self._clicked_idx]
+            pos = event.position().toPoint()
             
+            # 點擊左側 30px 開關燈號，或右側文字切換滑桿
+            if pos.x() < r.left() + 30:
+                new_state = not self._states.get(key, True)
+                self._states[key] = new_state
+                self.toggle_requested.emit(key, new_state)
+            else:
+                self._selected_filter = key
+                self.filter_selected.emit(key)
+            
+        self._clicked_idx = -1
         self._active_idx = -1
+        self._has_dragged = False
+        self.update()
         self.update()
