@@ -794,21 +794,7 @@ class OverlayWindow(QMainWindow):
         except Exception:
             return None
 
-    def closeEvent(self, event: QCloseEvent) -> None:
-        if hasattr(self, "timer"):
-            self.timer.stop()
-        self._coalesce_timer.stop()
-        if hasattr(self, "calc_worker"):
-            self.calc_worker.stop()
-        if hasattr(self, "auto_balance_worker"):
-            self.auto_balance_worker.stop()
-        if hasattr(self, "image_mode") and self.image_mode is not None:
-            self.image_mode.close()
-        if getattr(self, "_mirror_window", None) is not None:
-            self._mirror_window.close()
-        if hasattr(self, "hotkeys"):
-            self.hotkeys.shutdown()
-        event.accept()
+
 
     def refresh_frame(self) -> None:
         """核心影像處理管線。"""
@@ -1326,12 +1312,31 @@ class OverlayWindow(QMainWindow):
         self.request_refresh(5)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        # 儲存視窗狀態
         geom = self.geometry()
         self.store.update(x=geom.x(), y=geom.y(), width=geom.width(), height=geom.height())
+        
+        # 停止背景更新機制與執行緒 (避免 QThread Leak)
+        if hasattr(self, "timer"):
+            self.timer.stop()
+        self._coalesce_timer.stop()
+        if hasattr(self, "calc_worker"):
+            self.calc_worker.stop()
+        if hasattr(self, "auto_balance_worker"):
+            self.auto_balance_worker.stop()
+            
+        # 釋放全域快速鍵與子視窗
         self.hotkeys.shutdown()
         self.panel.close()
         self.image_mode.close()
+        if getattr(self, "_mirror_window", None) is not None:
+            self._mirror_window.close()
+            
         event.accept()
+        
+        # 強制退出，終結所有可能的 Windows 鍵盤鉤子資源洩漏
+        import os
+        os._exit(0)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
