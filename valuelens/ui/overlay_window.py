@@ -454,10 +454,6 @@ class OverlayWindow(QMainWindow):
         if "compare_mode" in changed_keys:
             self._compare_mode = self.settings.compare_mode
             self._raw_frame = QPixmap()
-            if self._compare_mode:
-                self.resize(self.width() * 2, self.height())
-            else:
-                self.resize(max(300, self.width() // 2), self.height())
             self._layout_overlay_buttons()
             
         if "compare_bw" in changed_keys:
@@ -865,8 +861,14 @@ class OverlayWindow(QMainWindow):
 
             # --- Bypass 模式：跳過量化，直接顯示原始影像 ---
             if self._bypass_mode:
-                self._frame_array = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                qimg = bgr_to_qimage(frame)
+                if self._compare_mode:
+                    half_w = w // 2
+                    left_bgr = np.ascontiguousarray(frame[:, :half_w])
+                    self._frame_array = np.ascontiguousarray(cv2.cvtColor(left_bgr, cv2.COLOR_BGR2RGB))
+                    qimg = bgr_to_qimage(left_bgr)
+                else:
+                    self._frame_array = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                    qimg = bgr_to_qimage(frame)
                 qimg.setDevicePixelRatio(dpr)
                 self._frame = QPixmap.fromImage(qimg)
                 self._processed_distribution_pct = [0.0] * max(2, int(self.settings.levels))
@@ -875,10 +877,16 @@ class OverlayWindow(QMainWindow):
                 self._is_refreshing = False
             else:
                 # 正常量化處理：丟進 QThread 背景計算
-                self.calc_worker.process_frame(frame.copy(), self.settings)
+                if self._compare_mode:
+                    half_w = w // 2
+                    left_bgr = np.ascontiguousarray(frame[:, :half_w])
+                    left_gray = np.ascontiguousarray(gray_frame[:, :half_w])
+                    self.calc_worker.process_frame(left_gray, self.settings)
+                    self._last_calc_frame = left_bgr.copy()
+                else:
+                    self.calc_worker.process_frame(gray_frame, self.settings)
+                    self._last_calc_frame = frame.copy()
                 
-                # 暫存執行緒運算當下的關鍵變數給 finished 使用
-                self._last_calc_frame = frame.copy()
                 self._last_calc_dpr = dpr
                 self._last_calc_t_start = t_start
                 self._last_calc_t_captured = t_captured
@@ -931,7 +939,8 @@ class OverlayWindow(QMainWindow):
             # 3. 處理對照圖
             if self._compare_mode:
                 if self.settings.compare_bw:
-                    gray_cont = np.ascontiguousarray(self._last_gray_frame)
+                    half_gray = self._last_gray_frame[:, :w]
+                    gray_cont = np.ascontiguousarray(half_gray)
                     self._raw_frame_array = gray_cont
                     raw_qimg = gray_to_qimage(gray_cont)
                 else:

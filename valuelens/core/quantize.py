@@ -148,7 +148,10 @@ class FilterContext:
         
         # 【超高清輸入源】：永遠維持 100% 乾淨無污染
         self.original_bgr = bgr
-        self.original_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        if len(bgr.shape) == 3 and bgr.shape[2] == 3:
+            self.original_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        else:
+            self.original_gray = bgr.copy()
         
         # 【Ａ軌】：主色調畫布（允許被平滑、抖動演算法修改）
         self.working_gray = self.original_gray.copy()
@@ -235,9 +238,13 @@ def quantize_gray_with_indices(
     }
     
     # 【積木隨意搬風】：依照 process_order 動態呼叫
+    import time
     for step in process_order:
         if step in FILTERS:
+            t0 = time.perf_counter()
             FILTERS[step].apply(ctx, **kwargs)
+            t1 = time.perf_counter()
+            print(f"  [Filter Step] {step}: {(t1-t0)*1000:.2f}ms", flush=True)
             
     # 最終量化查表
     lut = get_quantization_lut(ctx.levels, ctx.min_val, ctx.max_val, ctx.exp_val)
