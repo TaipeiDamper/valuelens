@@ -758,7 +758,8 @@ class OverlayWindow(QMainWindow):
                 rect_compare_bw=self._rect_compare_bw,
                 compare_bw=self.settings.compare_bw,
                 rect_global_calc=self._rect_global_calc,
-                use_global_calc=self._use_global_calc
+                use_global_calc=self._use_global_calc,
+                custom_palette=getattr(self.settings, 'custom_palette', [])
             )
 
     def request_refresh(self, delay_ms: int = 33) -> None:
@@ -778,6 +779,13 @@ class OverlayWindow(QMainWindow):
             return int(self.winId())
         except Exception:
             return None
+
+    def _distribution_rect(self) -> QRect:
+        lens = self._lens_rect()
+        levels = max(2, int(self.settings.levels))
+        row_h = 24
+        block_height = levels * row_h + 2
+        return QRect(lens.left() + 8, lens.top() + 8, 116, block_height)
 
     def _physical_window_rect(self) -> tuple[int, int, int, int] | None:
         if not sys.platform.startswith("win"):
@@ -894,14 +902,22 @@ class OverlayWindow(QMainWindow):
             # 釋放引用避免記憶體洩漏
             self._last_calc_frame = None
             
-            h, w = logic_quantized.shape[:2]
+            # 根據 custom_palette 生成 base_bgr
+            levels = max(2, int(self.settings.levels))
+            palette = getattr(self.settings, 'custom_palette', [])
+            
+            if palette and len(palette) == levels:
+                palette_bgr = np.zeros((levels, 3), dtype=np.uint8)
+                for i, color in enumerate(palette):
+                    palette_bgr[i] = color[::-1] # RGB -> BGR
+                base_bgr = palette_bgr[logic_indices]
+            else:
+                base_bgr = cv2.cvtColor(logic_quantized, cv2.COLOR_GRAY2BGR)
             
             # 處理邊緣與比例 (Edge Mix)
             if edges is not None:
                 mix = self.settings.edge_mix / 100.0
                 ec = self.settings.edge_color[::-1] # RGB -> BGR
-                
-                base_bgr = cv2.cvtColor(logic_quantized, cv2.COLOR_GRAY2BGR)
                 
                 if mix >= 1.0:
                     final_bgr = np.full_like(base_bgr, 255)
@@ -914,8 +930,8 @@ class OverlayWindow(QMainWindow):
                 self._frame_array = np.ascontiguousarray(cv2.cvtColor(final_bgr, cv2.COLOR_BGR2RGB))
                 qimg = bgr_to_qimage(final_bgr)
             else:
-                self._frame_array = logic_quantized
-                qimg = gray_to_qimage(logic_quantized)
+                self._frame_array = np.ascontiguousarray(cv2.cvtColor(base_bgr, cv2.COLOR_BGR2RGB))
+                qimg = bgr_to_qimage(base_bgr)
             
             qimg.setDevicePixelRatio(dpr)
             self._frame = QPixmap.fromImage(qimg)
@@ -1105,10 +1121,17 @@ class OverlayWindow(QMainWindow):
         self.panel.update_presets_ui(self.settings.presets)
 
     def on_load_preset(self, index: int) -> None:
-        slot = self.settings.presets[index]
-        if not slot: return
-        
-        data = slot["data"]
+        if index == -1:
+            data = getattr(self.settings, 'last_state', None)
+            if not data: return
+        elif index == -2:
+            data = getattr(self.settings, 'last_color_state', None)
+            if not data: return
+        else:
+            slot = self.settings.presets[index]
+            if not slot: return
+            data = slot["data"]
+            
         defaults = asdict(AppSettings())
         # 保留目前的 presets 與視窗幾何
         current_presets = self.settings.presets
@@ -1200,6 +1223,36 @@ class OverlayWindow(QMainWindow):
                         super().mousePressEvent(event)
                         return
                     curr = curr.parentWidget()
+            
+            # 檢查灰階比例面板點擊
+            dist_rect = self._distribution_rect()
+            if getattr(self, '_show_distribution', True) and dist_rect.contains(pos):
+                local_y = pos.y() - dist_rect.top() - 1
+                idx = local_y // 24
+                levels = max(2, int(self.settings.levels))
+                if 0 <= idx < levels:
+                    palette_idx = levels - 1 - idx
+                    from PySide6.QtWidgets import QColorDialog
+                    from PySide6.QtGui import QColor
+                    palette = getattr(self.settings, 'custom_palette', [])
+                    if not palette or len(palette) != levels:
+                        palette = []
+                        for i in range(levels):
+                            tone = int(round((i / max(1, levels - 1)) * 255))
+                            palette.append((tone, tone, tone))
+                    
+                    curr_color = QColor(*palette[palette_idx])
+                    new_color = QColorDialog.getColor(curr_color, self, "選擇階層顏色")
+                    
+                    if new_color.isValid():
+                        palette[palette_idx] = (new_color.red(), new_color.green(), new_color.blue())
+                        self.settings.custom_palette = palette
+                        self._last_frame_signature = None
+                        self._is_refreshing = False
+                        self.refresh_frame()
+                        self.update()
+                event.accept()
+                return
             
             # 檢查手動按鈕點擊 (優先於平移)
             if not self._rect_compare_bw.isNull() and self._rect_compare_bw.contains(pos):
@@ -1313,7 +1366,15 @@ class OverlayWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         # 儲存視窗狀態
         geom = self.geometry()
-        self.store.update(x=geom.x(), y=geom.y(), width=geom.width(), height=geom.height())
+        from dataclasses import asdict
+        current_dict = asdict(self.settings)
+        current_dict.update(x=geom.x(), y=geom.y(), width=geom.width(), height=geom.height())
+        
+        self.settings.last_state = current_dict
+        if getattr(self.settings, 'custom_palette', []):
+            self.settings.last_color_state = current_dict
+            
+        self.store.save(self.settings)
         
         # 停止背景更新機制與執行緒 (避免 QThread Leak)
         if hasattr(self, "timer"):

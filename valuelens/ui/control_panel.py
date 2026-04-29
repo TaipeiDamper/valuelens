@@ -158,6 +158,7 @@ class ControlPanel(QWidget):
         self.setStyleSheet(_PANEL_STYLE)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
+        self.settings = settings
         self._current_hotkey = settings.hotkey
 
         self.levels = QComboBox()
@@ -290,6 +291,14 @@ class ControlPanel(QWidget):
         self.display_reset_btn.setText("Reset")
         self.display_reset_btn.setToolTip("重置第二階段 (Display) 參數")
 
+        self.clear_palette_btn = QToolButton()
+        self.clear_palette_btn.setText("🎨清空染色")
+        self.clear_palette_btn.setToolTip("清除目前色彩對應，還原為預設黑白灰")
+        
+        self.clear_all_btn = QToolButton()
+        self.clear_all_btn.setText("🧹清空全部")
+        self.clear_all_btn.setToolTip("還原所有參數到預設、最安全乾淨的狀態")
+
         # Sliders
         self.blur_slider = QSlider(Qt.Orientation.Horizontal)
         self.blur_slider.setObjectName("blur_slider")
@@ -406,6 +415,7 @@ class ControlPanel(QWidget):
         row2.addWidget(self.logic_exp_label)
         row2.addWidget(self.exp_slider)
         row2.addWidget(self.logic_reset_btn)
+        row2.addWidget(self.clear_all_btn)
 
         # 標籤排序行 (改為自適應寬度)
         order_row = QHBoxLayout()
@@ -448,6 +458,7 @@ class ControlPanel(QWidget):
         bottom_row.addWidget(self.display_exp_label)
         bottom_row.addWidget(self.display_exp_slider)
         bottom_row.addWidget(self.display_reset_btn)
+        bottom_row.addWidget(self.clear_palette_btn)
 
         self.extra_container = QWidget()
         extra_layout = QVBoxLayout(self.extra_container)
@@ -490,8 +501,40 @@ class ControlPanel(QWidget):
         self.auto_continuous_check.toggled.connect(self.auto_continuous_toggled.emit)
         self.logic_reset_btn.clicked.connect(self._reset_logic_settings)
         self.display_reset_btn.clicked.connect(self._reset_display_settings)
+        self.clear_palette_btn.clicked.connect(self._clear_palette)
+        self.clear_all_btn.clicked.connect(self._clear_all_settings)
         self.save_startup_action.triggered.connect(self.save_startup_requested.emit)
         self.clear_startup_action.triggered.connect(self.clear_startup_requested.emit)
+
+    def _clear_palette(self) -> None:
+        """清除自訂調色盤，回復灰階模式。"""
+        self.settings.custom_palette = []
+        self._emit_settings()
+
+    def _clear_all_settings(self) -> None:
+        """完全清除所有濾鏡與重置參數。"""
+        s = self.settings
+        s.blur_enabled = False
+        s.dither_enabled = False
+        s.edge_enabled = False
+        s.morph_enabled = False
+        s.levels = 3
+        s.min_value = 0
+        s.max_value = 255
+        s.exp_value = 0.0
+        s.display_min_value = 0
+        s.display_max_value = 255
+        s.display_exp_value = 0.0
+        s.blur_radius = 0
+        s.dither_strength = 0
+        s.edge_strength = 50
+        s.edge_mix = 100
+        s.morph_strength = 1
+        s.morph_threshold = 35
+        s.custom_palette = []
+        
+        self.sync_from_settings(s)
+        self._emit_settings()
 
     def _on_collapse_toggled(self, checked: bool) -> None:
         if checked:
@@ -623,6 +666,25 @@ class ControlPanel(QWidget):
         self.clear_startup_action.triggered.connect(self.clear_startup_requested.emit)
         self.preset_menu.addAction(self.save_startup_action)
         self.preset_menu.addAction(self.clear_startup_action)
+        # 讀取自動預設集
+        if getattr(self.settings, 'last_state', None) is not None:
+            load_last_act = QAction("讀取：上次最後的設定 (自動)", self)
+            load_last_act.triggered.connect(lambda: self.load_preset_requested.emit(-1))
+            self.preset_menu.addAction(load_last_act)
+        else:
+            act1 = QAction("上次最後的設定 (無資料)", self)
+            act1.setEnabled(False)
+            self.preset_menu.addAction(act1)
+
+        if getattr(self.settings, 'last_color_state', None) is not None:
+            load_color_act = QAction("讀取：上次染色的設定 (自動)", self)
+            load_color_act.triggered.connect(lambda: self.load_preset_requested.emit(-2))
+            self.preset_menu.addAction(load_color_act)
+        else:
+            act2 = QAction("上次染色的設定 (無資料)", self)
+            act2.setEnabled(False)
+            self.preset_menu.addAction(act2)
+
         self.preset_menu.addSeparator()
 
         # 20 組欄位

@@ -35,6 +35,7 @@ def run() -> None:
     app.setApplicationName("ValueLens")
 
     settings = SettingsManager().load()
+    settings.custom_palette = []
     window = OverlayWindow(settings=settings)
     window.show()
 

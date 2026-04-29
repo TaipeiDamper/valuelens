@@ -38,6 +38,9 @@ class AppSettings:
     startup_preset: dict | None = None
     presets: list[dict | None] = field(default_factory=lambda: [None] * 20)
     process_order: list[str] = ("blur", "dither", "edge", "morph")
+    custom_palette: list[tuple[int, int, int]] = field(default_factory=list)
+    last_state: dict | None = None
+    last_color_state: dict | None = None
 
 
 class SettingsManager:

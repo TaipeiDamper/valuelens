@@ -95,12 +95,21 @@ class RenderWidget(QWidget):
         painter.setPen(Qt.GlobalColor.white)
         painter.drawRect(block_rect.adjusted(0, 0, -1, -1))
 
+        self.custom_palette = getattr(self, 'custom_palette', [])
+
         for idx, pct in enumerate(display_values):
             top = block_rect.top() + 1 + idx * row_h
             row_rect = QRect(block_rect.left() + 1, top, block_rect.width() - 2, row_h - 1)
-            tone = int(round(((rows_count - 1 - idx) / max(1, rows_count - 1)) * 255))
-            fill_color = QColor(tone, tone, tone)
-            text_color = Qt.GlobalColor.black if tone >= 128 else Qt.GlobalColor.white
+            
+            if self.custom_palette and len(self.custom_palette) == rows_count:
+                color_rgb = self.custom_palette[rows_count - 1 - idx]
+                fill_color = QColor(*color_rgb)
+                brightness = 0.299 * color_rgb[0] + 0.587 * color_rgb[1] + 0.114 * color_rgb[2]
+                text_color = Qt.GlobalColor.black if brightness >= 128 else Qt.GlobalColor.white
+            else:
+                tone = int(round(((rows_count - 1 - idx) / max(1, rows_count - 1)) * 255))
+                fill_color = QColor(tone, tone, tone)
+                text_color = Qt.GlobalColor.black if tone >= 128 else Qt.GlobalColor.white
             
             painter.fillRect(row_rect, fill_color)
             painter.setPen(Qt.GlobalColor.white)
