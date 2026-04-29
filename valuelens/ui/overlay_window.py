@@ -785,7 +785,7 @@ class OverlayWindow(QMainWindow):
         levels = max(2, int(self.settings.levels))
         row_h = 24
         block_height = levels * row_h + 2
-        return QRect(lens.left() + 8, lens.top() + 8, 116, block_height)
+        return QRect(lens.left() + 8, lens.bottom() - 8 - block_height, 116, block_height)
 
     def _physical_window_rect(self) -> tuple[int, int, int, int] | None:
         if not sys.platform.startswith("win"):

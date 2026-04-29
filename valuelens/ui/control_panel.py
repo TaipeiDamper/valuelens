@@ -414,21 +414,18 @@ class ControlPanel(QWidget):
         self.logic_exp_label.setFixedWidth(100)
         row2.addWidget(self.logic_exp_label)
         row2.addWidget(self.exp_slider)
-        row2.addWidget(self.logic_reset_btn)
-        row2.addWidget(self.clear_all_btn)
 
         # 標籤排序行 (改為自適應寬度)
         order_row = QHBoxLayout()
         order_row.setContentsMargins(8, 2, 8, 2)
         order_row.addWidget(self.order_widget)
-        # 不再 addStretch，讓 widget 填滿
 
         # 參數調整區域 (改用 GridLayout 以防炸掉)
         params_grid = QGridLayout()
         params_grid.setContentsMargins(8, 4, 8, 4)
         params_grid.setSpacing(10)
+        params_grid.setHorizontalSpacing(30)
         
-        # 第一排：Smoothing, Dithering, Outlines
         params_grid.addWidget(QLabel("Blur"), 0, 0)
         params_grid.addWidget(self.blur_slider, 0, 1)
         params_grid.addWidget(QLabel("Dither"), 0, 2)
@@ -436,7 +433,6 @@ class ControlPanel(QWidget):
         params_grid.addWidget(QLabel("Morph"), 0, 4)
         params_grid.addWidget(self.morph_slider, 0, 5)
         
-        # 第二排：Edges 強度與比例
         params_grid.addWidget(QLabel("Edge Strength"), 1, 0)
         params_grid.addWidget(self.edge_slider, 1, 1)
         params_grid.addWidget(QLabel("Edge Mix"), 1, 2)
@@ -457,8 +453,22 @@ class ControlPanel(QWidget):
         self.display_exp_label.setFixedWidth(100)
         bottom_row.addWidget(self.display_exp_label)
         bottom_row.addWidget(self.display_exp_slider)
-        bottom_row.addWidget(self.display_reset_btn)
-        bottom_row.addWidget(self.clear_palette_btn)
+
+        # 獨立的重置功能按鈕行
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(10, 4, 10, 6)
+        btn_row.setSpacing(12)
+        btn_row.addStretch(1)
+        
+        # 變更按鈕名稱以利對齊
+        self.logic_reset_btn.setText("🔄重置輸入")
+        self.display_reset_btn.setText("🔄重置輸出")
+        
+        btn_row.addWidget(self.logic_reset_btn)
+        btn_row.addWidget(self.display_reset_btn)
+        btn_row.addWidget(self.clear_palette_btn)
+        btn_row.addWidget(self.clear_all_btn)
+        btn_row.addStretch(1)
 
         self.extra_container = QWidget()
         extra_layout = QVBoxLayout(self.extra_container)
@@ -468,9 +478,10 @@ class ControlPanel(QWidget):
         extra_layout.addLayout(order_row)
         extra_layout.addLayout(params_grid)
         extra_layout.addLayout(bottom_row)
+        extra_layout.addLayout(btn_row)
 
         layout = QVBoxLayout(self)
-        self.setFixedHeight(200) # 兩行參數後增加高度
+        self.setFixedHeight(230) # 兩行參數後增加高度
         self.setMinimumWidth(500) # 防止視窗縮太小導致 UI 完全崩潰
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -543,7 +554,7 @@ class ControlPanel(QWidget):
             self.collapse_btn.setText("▼")
         else:
             self.extra_container.show()
-            self.setFixedHeight(200)
+            self.setFixedHeight(230)
             self.collapse_btn.setText("▲")
         self.collapse_toggled.emit(checked)
 

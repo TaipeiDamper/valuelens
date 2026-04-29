@@ -89,7 +89,7 @@ class RenderWidget(QWidget):
         rows_count = max(1, len(display_values))
         row_h = 24
         block_height = rows_count * row_h + 2
-        block_rect = QRect(rect.left() + 8, rect.top() + 8, 116, block_height)
+        block_rect = QRect(rect.left() + 8, rect.bottom() - 8 - block_height, 116, block_height)
         
         painter.fillRect(block_rect, Qt.GlobalColor.black)
         painter.setPen(Qt.GlobalColor.white)
