@@ -174,7 +174,6 @@ class OverlayWindow(QMainWindow):
         self.panel.auto_balance_raw_requested.connect(self.on_auto_balance_raw_requested)
         self.panel.auto_balance_target_requested.connect(self.on_auto_balance_target_requested)
         self.panel.auto_continuous_toggled.connect(self.on_auto_continuous_toggled)
-        self.panel.edge_settings_changed.connect(self.on_edge_settings_changed)
         self.panel.import_requested.connect(self.toggle_freeze_mode)
         self.panel.screenshot_requested.connect(self.on_screenshot_requested)
         self.panel.image_mode_requested.connect(self.open_image_mode)

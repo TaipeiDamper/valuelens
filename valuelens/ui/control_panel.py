@@ -319,14 +319,15 @@ class ControlPanel(QWidget):
 
         self.morph_slider = QSlider(Qt.Orientation.Horizontal)
         self.morph_slider.setObjectName("morph_slider")
-        self.morph_slider.setRange(0, 20)
-        self.morph_slider.setValue(settings.morph_strength)
+        self.morph_slider.setRange(0, 5)
+        self.morph_slider.setValue(min(5, settings.morph_strength))
         self.morph_slider.setMinimumWidth(80)
         self.morph_slider.setToolTip("勾邊粗細 (Morphological Gradient)")
 
         self.morph_thresh_slider = QSlider(Qt.Orientation.Horizontal)
         self.morph_thresh_slider.setObjectName("morph_thresh_slider")
         self.morph_thresh_slider.setRange(1, 255)
+        self.morph_thresh_slider.setInvertedAppearance(True) # 反轉滑桿外觀：往右拉 = 門檻低 = 線條變多
         self.morph_thresh_slider.setValue(settings.morph_threshold)
         self.morph_thresh_slider.setMinimumWidth(80)
         self.morph_thresh_slider.setToolTip("勾邊靈敏度門檻 (降低防爆)")
@@ -737,12 +738,10 @@ class ControlPanel(QWidget):
         self.order_widget.set_order(settings.process_order, states)
         self.edge_slider.setValue(settings.edge_strength)
         self.edge_mix_slider.setValue(settings.edge_mix)
-        self.morph_slider.setValue(settings.morph_strength)
+        self.morph_slider.setValue(min(5, settings.morph_strength))
         self.morph_thresh_slider.setValue(settings.morph_threshold)
         self._current_hotkey = settings.hotkey
         self.hotkey_action.setText(f"設定快捷鍵 ({settings.hotkey})")
-        # Update labels
-        self._emit_settings()
         self._emit_display_settings()
         self.update_presets_ui(settings.presets)
 
