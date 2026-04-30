@@ -20,8 +20,9 @@ def run_verification(video_path="test_pattern.mp4", meta_path="test_metadata.jso
         metadata = json.load(f)
 
     cap = cv2.VideoCapture(video_path)
-    from valuelens.core.scene_detector import RandomSceneDetector
-    detector = RandomSceneDetector(threshold=10.0, sample_count=256)
+    from valuelens.config.settings import AppSettings
+    settings = AppSettings()
+    detector = RandomSceneDetector(threshold=settings.scene_threshold, sample_count=settings.sample_count)
     
     print(f"{'Frame':<6} | {'Phase':<12} | {'True (B/G/W)':<12} | {'Calc (B/G/W)':<12} | {'Error %':<8} | {'Detect'}")
     print("-" * 85)

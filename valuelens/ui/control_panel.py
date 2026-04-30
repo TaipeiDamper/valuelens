@@ -127,7 +127,7 @@ QSlider::handle:horizontal:hover {
 
 
 class ControlPanel(QWidget):
-    settings_changed = Signal(int, int, int, float)
+    settings_changed = Signal(int, int, int, float, int) # levels, min, max, exp, mode
     display_settings_changed = Signal(int, int, float)
     effect_settings_changed = Signal(bool, int, bool, int)
     collapse_toggled = Signal(bool)
@@ -173,8 +173,15 @@ class ControlPanel(QWidget):
         else:
             self.levels.addItem(str(settings.levels), settings.levels)
             self.levels.setCurrentIndex(self.levels.count() - 1)
-        self.levels.setFixedWidth(50)
         self.levels.setToolTip("階層數量 (Quantization Levels)")
+        self.levels.currentIndexChanged.connect(self._on_settings_changed)
+
+        self.curve_mode = QComboBox()
+        self.curve_mode.addItems(["Gamma", "Sigmoid", "Log"])
+        self.curve_mode.setCurrentIndex(settings.curve_mode)
+        self.curve_mode.setFixedWidth(85)
+        self.curve_mode.setToolTip("映射模式 (Curve Mode)")
+        self.curve_mode.currentIndexChanged.connect(self._on_settings_changed)
 
         self.enabled_check = QCheckBox()
         self.enabled_check.setChecked(settings.compare_mode)
@@ -369,7 +376,6 @@ class ControlPanel(QWidget):
         top_layout.setContentsMargins(10, 8, 10, 4)
         top_layout.setSpacing(8)
         
-        # 階層分組
         top_layout.addWidget(QLabel("階層"))
         top_layout.addWidget(self.levels)
         top_layout.addWidget(self.enabled_check)
@@ -422,6 +428,7 @@ class ControlPanel(QWidget):
         
         row2.addWidget(self.toggle_output_btn)
         row2.addWidget(self.range_slider, 1)
+        row2.addWidget(self.curve_mode)
         self.logic_exp_label = QLabel("偏差")
         self.logic_exp_label.setFixedWidth(115)
         row2.addWidget(self.logic_exp_label)
@@ -595,6 +602,9 @@ class ControlPanel(QWidget):
             self.slider_layout.addWidget(self.morph_thresh_slider)
             
         self.slider_container.update()
+        
+    def _on_settings_changed(self, *_) -> None:
+        self._emit_settings()
 
     def _on_levels_changed(self, index: int) -> None:
         lvl = _LEVEL_PRESETS[index]
@@ -622,6 +632,7 @@ class ControlPanel(QWidget):
             l_val,
             u_val,
             val,
+            self.curve_mode.currentIndex()
         )
 
     def _on_display_range_change(self, min_value: int, max_value: int) -> None:

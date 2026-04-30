@@ -59,8 +59,16 @@ def create_value_test(output_path="value_test.mp4", duration_sec=10, fps=30):
         black_pct = float(counts[0] / frame.size * 100)
         gray_pct = float(counts[1] / frame.size * 100)
         white_pct = float(counts[2] / frame.size * 100)
-        is_changed = (f % fps == 0) or (f % 5 == 0) # 每 5 幀變一次
-        
+        # --- 真實變動判定 ---
+        current_gray = frame.astype(np.float32)
+        if f == 0:
+            is_changed = True
+            self_last_gray = current_gray
+        else:
+            mse_full = np.mean((current_gray - self_last_gray)**2)
+            is_changed = bool(mse_full > 1.0)
+            self_last_gray = current_gray
+            
         metadata.append({
             "frame": f,
             "avg_brightness": float(np.mean(frame)),

@@ -11,22 +11,33 @@ except Exception:
 # Cache for the LUT to avoid re-calculating if parameters haven't changed
 _CURRENT_QUANT_LUT: tuple[tuple, np.ndarray] | None = None
 
-def get_quantization_lut(levels: int, min_val: int, max_val: int, exp_val: float) -> np.ndarray:
+def get_quantization_lut(levels: int, min_val: int, max_val: int, exp_val: float, curve_mode: int = 0) -> np.ndarray:
     global _CURRENT_QUANT_LUT
-    params = (levels, min_val, max_val, exp_val)
+    params = (levels, min_val, max_val, exp_val, curve_mode)
     if _CURRENT_QUANT_LUT is not None and _CURRENT_QUANT_LUT[0] == params:
         return _CURRENT_QUANT_LUT[1]
     
-    inputs = np.arange(256, dtype=np.float32)
+    x_raw = np.arange(256, dtype=np.float32)
     denom = max(1, max_val - min_val)
-    norm = (inputs - min_val) / denom
-    norm = np.clip(norm, 0.0, 1.0)
+    x = np.clip((x_raw - min_val) / denom, 0.0, 1.0)
     
-    if exp_val != 0:
-        gamma = float(np.power(2.0, float(exp_val)))
-        norm = np.power(norm, gamma)
+    gamma = 2.0 ** float(exp_val)
+    
+    if curve_mode == 0: # Gamma
+        y = np.power(x, gamma)
+    elif curve_mode == 1: # Sigmoid (S-Curve)
+        eps = 1e-6
+        x_g = np.power(x, gamma)
+        inv_x_g = np.power(1.0 - x + eps, gamma)
+        y = x_g / (x_g + inv_x_g)
+    elif curve_mode == 2: # Log
+        k = (float(exp_val) + 2.0) * 10.0
+        if k < 0.1: k = 0.1
+        y = np.log(1.0 + k * x) / np.log(1.0 + k)
+    else:
+        y = x
         
-    idx = np.floor(norm * levels)
+    idx = np.floor(y * levels)
     idx = np.clip(idx, 0, levels - 1).astype(np.uint8)
     
     _CURRENT_QUANT_LUT = (params, idx)
@@ -144,21 +155,21 @@ class FilterContext:
     影像處理管線的 Context 封裝箱（狀態管理者）。
     負責存放原始影像與各階段衍生資料，確保資料流向明確。
     """
-    def __init__(self, bgr: np.ndarray, levels: int, min_val: int, max_val: int, exp_val: float, buffer_manager: Any = None):
+    def __init__(self, bgr: np.ndarray, levels: int, min_val: int, max_val: int, exp_val: float, curve_mode: int = 0, buffer_manager: Any = None):
         self.levels = max(2, int(levels))
         self.min_val = int(min_val)
         self.max_val = int(max_val)
         self.exp_val = float(exp_val)
+        self.curve_mode = int(curve_mode)
         self.buffer_manager = buffer_manager
         
-        # 【超高清輸入源】：永遠維持 100% 乾淨無污染
-        self.original_bgr = bgr
+        # 【超高清輸入源】：強制使用副本，徹底隔離後續濾鏡的污染
         if len(bgr.shape) == 3 and bgr.shape[2] == 3:
             self.original_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         else:
             self.original_gray = bgr.copy()
         
-        # 【Ａ軌】：主色調畫布（允許被平滑、抖動演算法修改）
+        # 【Ａ軌】：主色調畫布（必須是另一個獨立複本）
         self.working_gray = self.original_gray.copy()
         
         # 【成果輸出區】
@@ -210,6 +221,7 @@ def quantize_gray_with_indices(
     min_value: int = 0,
     max_value: int = 255,
     exp_value: float = 0.0,
+    curve_mode: int = 0,
     display_min: int | None = None,
     display_max: int | None = None,
     display_exp: float | None = None,
@@ -227,10 +239,10 @@ def quantize_gray_with_indices(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray]:
     """模組化影像濾鏡與量化入口點，回傳 (量化彩色影像, 索引矩陣, 邊緣矩陣, 真實比例計數)。"""
     levels = max(2, int(levels))
-    ctx = FilterContext(bgr, levels, min_value, max_value, exp_value, buffer_manager=buffer_manager)
+    ctx = FilterContext(bgr, levels, min_value, max_value, exp_value, curve_mode, buffer_manager=buffer_manager)
     
     # --- 關鍵：在濾鏡之前獲取「真實比例」 (採用抽樣優化) ---
-    lut = get_quantization_lut(ctx.levels, ctx.min_val, ctx.max_val, ctx.exp_val)
+    lut = get_quantization_lut(ctx.levels, ctx.min_val, ctx.max_val, ctx.exp_val, ctx.curve_mode)
     
     # 對統計資料進行降採樣，解析度越高省下的時間越多
     h_orig, w_orig = ctx.original_gray.shape

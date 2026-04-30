@@ -22,6 +22,7 @@ class AppSettings:
     enabled: bool = True
     blur_enabled: bool = False
     blur_radius: int = 0
+    curve_mode: int = 0  # 0: Gamma, 1: Sigmoid, 2: Log
     dither_enabled: bool = False
     dither_strength: int = 0
     edge_enabled: bool = False
@@ -32,9 +33,9 @@ class AppSettings:
     morph_strength: int = 1
     morph_threshold: int = 35
     refresh_ms: int = 16
-    scene_threshold: float = 30.0
+    scene_threshold: float = 10.0
     sync_timeout_s: float = 1.0
-    sample_count: int = 256
+    sample_count: int = 1024
     x: int = 200
     y: int = 200
     width: int = 640

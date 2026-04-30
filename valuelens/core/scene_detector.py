@@ -1,4 +1,5 @@
 import numpy as np
+import cv2
 from typing import Tuple
 
 class RandomSceneDetector:
@@ -7,7 +8,7 @@ class RandomSceneDetector:
     結合 MAE (平均絕對誤差) 與 MSE (均方誤差) 指標。
     每次偵測到變動後會自動更換部分採樣點，消除盲區。
     """
-    def __init__(self, threshold: float = 30.0, sample_count: int = 256):
+    def __init__(self, threshold: float = 10.0, sample_count: int = 1024):
         self.threshold = threshold
         self.sample_count = sample_count
         self.last_samples = None
@@ -29,20 +30,27 @@ class RandomSceneDetector:
             self._regen_samples(gray_frame.shape)
         return gray_frame[self.sample_indices]
 
-    def detect_change(self, gray_frame: np.ndarray) -> Tuple[bool, float]:
-        """偵測畫面是否有顯著變動。回傳 (是否變動, MSE值)。"""
-        if gray_frame is None:
+    def detect_change(self, frame: np.ndarray) -> Tuple[bool, float]:
+        """
+        檢測畫面是否有顯著變動。
+        支援 BGR 或 Gray 輸入，內部會自動確保使用灰階進行比對。
+        """
+        if frame is None:
             return False, 0.0
 
-        h, w = gray_frame.shape
+        # 確保使用灰階進行判斷
+        if len(frame.shape) == 3:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            
+        h, w = frame.shape
         
         # 初始化或解析度改變時重新採樣
         if self.sample_indices is None or self.last_shape != (h, w):
             self._regen_samples((h, w))
-            self.last_samples = gray_frame[self.sample_indices]
+            self.last_samples = frame[self.sample_indices]
             return True, 0.0
 
-        current_samples = gray_frame[self.sample_indices]
+        current_samples = frame[self.sample_indices]
         
         # 同時計算 MAE 與 MSE
         diff = current_samples.astype(np.float32) - self.last_samples.astype(np.float32)

@@ -92,8 +92,16 @@ def create_color_stress_test(output_path="color_test.mp4", duration_sec=10, fps=
         gray_pct = float(counts[1] / gray.size * 100)
         white_pct = float(counts[2] / gray.size * 100)
         
-        # 簡單判定變動
-        is_changed = (f % 2 == 0) or (f % (fps * 2) == 0)
+        # --- 真實變動判定 ---
+        # 拿這一幀跟上一幀的比對 (全圖 MSE)
+        current_gray = gray.astype(np.float32)
+        if f == 0:
+            is_changed = True
+            self_last_gray = current_gray
+        else:
+            mse_full = np.mean((current_gray - self_last_gray)**2)
+            is_changed = bool(mse_full > 1.0)  # 只要全圖有一點點變動就標註為 True
+            self_last_gray = current_gray
         
         metadata.append({
             "frame": f,

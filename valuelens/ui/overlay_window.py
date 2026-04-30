@@ -486,8 +486,13 @@ class OverlayWindow(QMainWindow):
         self.request_refresh(16)
 
     def on_settings_changed(
-        self, levels: int, min_value: int, max_value: int, exp_value: float
+        self, levels: int, min_value: int, max_value: int, exp_value: float, curve_mode: int
     ) -> None:
+        self.settings.levels = levels
+        self.settings.min_value = min_value
+        self.settings.max_value = max_value
+        self.settings.exp_value = exp_value
+        self.settings.curve_mode = curve_mode
         # 同步更新背景偵測器的門檻
         if hasattr(self, 'cap_worker'):
             self.cap_worker.update_threshold(self.settings.scene_threshold)
@@ -569,16 +574,19 @@ class OverlayWindow(QMainWindow):
         print(f"[DEBUG][User Action] 快捷鍵變更: {hotkey}")
         self.store.update(hotkey=hotkey)
 
-    def _apply_balance_to_ui(self, lower: int, upper: int, exp_value: float) -> None:
+    def _apply_balance_to_ui(self, lower: int, upper: int, exp_value: float, curve_mode: int) -> None:
         """統一將平衡參數套用到所有 UI 組件，不觸發循環信號。"""
         self.panel.exp_slider.blockSignals(True)
         self.panel.range_slider.blockSignals(True)
+        self.panel.curve_mode.blockSignals(True)
         
         self.panel.exp_slider.setValue(int(round(-exp_value * 100.0)))
         self.panel.range_slider.set_values(lower, upper)
+        self.panel.curve_mode.setCurrentIndex(curve_mode)
         
         self.panel.exp_slider.blockSignals(False)
         self.panel.range_slider.blockSignals(False)
+        self.panel.curve_mode.blockSignals(False)
         
         # 同步更新本地設定
         self.store.update(min_value=lower, max_value=upper, exp_value=exp_value)
@@ -589,6 +597,10 @@ class OverlayWindow(QMainWindow):
         source_gray = self._last_gray_frame
         if self._is_static_mode and self._use_global_calc and self._full_image_gray is not None:
             source_gray = self._full_image_gray
+        elif self._compare_mode and source_gray is not None:
+            # 【關鍵修復】：對照模式下，只拿左半邊 (處理區) 來計算平衡，避免被右半邊原圖干擾
+            h, w = source_gray.shape
+            source_gray = np.ascontiguousarray(source_gray[:, :w//2])
             
         if source_gray is None or source_gray.size == 0:
             return
@@ -628,10 +640,12 @@ class OverlayWindow(QMainWindow):
             start_max,
             start_exp,
             self.settings.levels,
-            hysteresis_val
+            hysteresis_val,
+            current_mode=self.settings.curve_mode,
+            search_all_modes=False
         )
 
-    def _on_auto_balance_finished(self, lower: int, upper: int, exp_value: float) -> None:
+    def _on_auto_balance_finished(self, lower: int, upper: int, exp_value: float, curve_mode: int) -> None:
         def smooth_and_clamp(new, old, alpha=0.3, max_step=None, jump_thresh=45):
             diff = new - old
             if abs(diff) > jump_thresh:
@@ -663,8 +677,9 @@ class OverlayWindow(QMainWindow):
             abs(exp_value - self.settings.exp_value) > 0.02
         )
         
-        if changed:
-            self._apply_balance_to_ui(lower, upper, exp_value)
+        if changed or curve_mode != self.settings.curve_mode:
+            self.settings.curve_mode = curve_mode
+            self._apply_balance_to_ui(lower, upper, exp_value, curve_mode)
             self._last_frame_signature = None
             self.request_refresh(16)
 
@@ -686,17 +701,39 @@ class OverlayWindow(QMainWindow):
         self.request_refresh(16)
 
     def on_auto_balance_raw_requested(self) -> None:
-        print(f"[DEBUG][User Action] 請求自動平衡 (根據目前畫面)")
+        print(f"[DEBUG][User Action] 請求重設平衡 (根據原始畫面分佈)")
         # 點擊重新平衡時，關閉持續模式
         if self._auto_continuous_enabled:
             self._auto_continuous_enabled = False
             self.panel.auto_continuous_check.setChecked(False)
 
-        from valuelens.core.balance import levels_to_wgb
-        raw_wgb = levels_to_wgb(self._raw_distribution_pct)
+        source_gray = self._last_gray_frame
+        if self._is_static_mode and self._use_global_calc and self._full_image_gray is not None:
+            source_gray = self._full_image_gray
+            
+        if source_gray is None:
+            return
+
+        # 【關鍵修復】：不要用上一次計算的 true_counts (那會受手動拉動影響)
+        # 直接拿原始影像算一次 0~255 的自然分佈
+        from valuelens.core.balance import calc_level_distribution, levels_to_wgb
+        raw_dist = calc_level_distribution(source_gray, self.settings.levels)
+        raw_wgb = levels_to_wgb(raw_dist)
+        
+        # 根據真正的原始分佈尋找最接近的預設比例
         target_wgb = self.panel.nearest_balance_preset(raw_wgb)
         self.panel.set_balance_preset(target_wgb, mark_best=True)
-        self.on_auto_balance_target_requested(target_wgb)
+        
+        # 【全域優化】：請求搜尋所有模式的最佳解
+        self.auto_balance_worker.request_balance(
+            source_gray,
+            target_wgb,
+            0, 255, 0.0, # 重置起點
+            self.settings.levels,
+            0.0,
+            current_mode=self.settings.curve_mode,
+            search_all_modes=True
+        )
 
     def center_window(self) -> None:
         """將視窗移至目前螢幕的中央 (用於視窗跳出螢幕外時找回)。"""

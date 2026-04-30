@@ -7,7 +7,7 @@ from valuelens.core.balance import optimize_balance_params
 from valuelens.config.settings import AppSettings
 
 class AutoBalanceWorker(QThread):
-    finished = Signal(int, int, float)
+    finished = Signal(int, int, float, int) # min, max, exp, mode
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -21,10 +21,10 @@ class AutoBalanceWorker(QThread):
     def is_busy(self) -> bool:
         return self._busy
 
-    def request_balance(self, gray_frame: np.ndarray, target: tuple, current_min: int, current_max: int, current_exp: float, levels_count: int, hysteresis: float) -> None:
+    def request_balance(self, gray_frame: np.ndarray, target: tuple, current_min: int, current_max: int, current_exp: float, levels_count: int, hysteresis: float, current_mode: int = 0, search_all_modes: bool = False) -> None:
         self.mutex.lock()
         if not self._is_stopping:
-            self._pending_task = (gray_frame, target, current_min, current_max, current_exp, levels_count, hysteresis)
+            self._pending_task = (gray_frame, target, current_min, current_max, current_exp, levels_count, hysteresis, current_mode, search_all_modes)
             self.cond.wakeOne()
         self.mutex.unlock()
 
@@ -51,13 +51,13 @@ class AutoBalanceWorker(QThread):
             self.mutex.unlock()
             
             self._busy = True
-            gray_frame, target, current_min, current_max, current_exp, levels_count, hysteresis = task
+            gray_frame, target, current_min, current_max, current_exp, levels_count, hysteresis, current_mode, search_all_modes = task
             
             best_params = optimize_balance_params(
-                gray_frame, target, current_min, current_max, current_exp, levels_count, hysteresis
+                gray_frame, target, current_min, current_max, current_exp, levels_count, hysteresis, current_mode, search_all_modes
             )
             
-            self.finished.emit(best_params[0], best_params[1], best_params[2])
+            self.finished.emit(best_params[0], best_params[1], best_params[2], best_params[3])
             self._busy = False
 
 
@@ -140,6 +140,7 @@ class ImageProcessWorker(QThread):
                 settings.min_value,
                 settings.max_value,
                 settings.exp_value,
+                curve_mode=settings.curve_mode,
                 display_min=settings.display_min_value,
                 display_max=settings.display_max_value,
                 display_exp=settings.display_exp_value,

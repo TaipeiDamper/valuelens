@@ -1,7 +1,8 @@
-from __future__ import annotations
-
 import itertools
 import numpy as np
+
+# 預分配常用陣列以提升速度
+_VALUES_256 = np.arange(256, dtype=np.float32)
 
 def calc_level_distribution(gray: np.ndarray | None, levels: int) -> list[float]:
     """計算給定灰階圖在特定階調數下的分佈比例 (0.0~100.0)"""
@@ -10,7 +11,7 @@ def calc_level_distribution(gray: np.ndarray | None, levels: int) -> list[float]
         return [0.0] * level_count
     scaled = np.floor(gray.astype(np.float32) * level_count / 256.0)
     indices = np.clip(scaled, 0, level_count - 1).astype(np.int32)
-    counts = np.bincount(indices.reshape(-1), minlength=level_count).astype(np.float64)
+    counts = np.bincount(indices.ravel(), minlength=level_count).astype(np.float64)
     total = float(counts.sum())
     if total <= 0:
         return [0.0] * level_count
@@ -21,14 +22,7 @@ def calc_indices_distribution(indices: np.ndarray | None, levels: int) -> list[f
     level_count = max(2, int(levels))
     if indices is None or indices.size == 0:
         return [0.0] * level_count
-    
-    from valuelens.core.quantize import native_distribution_from_indices
-    native_dist = native_distribution_from_indices(indices, level_count)
-    if native_dist is not None and native_dist.size == level_count:
-        return native_dist.tolist()
-        
-    clamped = np.clip(indices.astype(np.int32), 0, level_count - 1)
-    counts = np.bincount(clamped.reshape(-1), minlength=level_count).astype(np.float64)
+    counts = np.bincount(indices.ravel(), minlength=level_count).astype(np.float64)
     total = float(counts.sum())
     if total <= 0:
         return [0.0] * level_count
@@ -69,123 +63,127 @@ def levels_to_wgb(values: list[float]) -> tuple[float, float, float]:
         b = (_s(0, 1, 2), _s(3, 4, 5), _s(6, 7))
         return a if _best_dist(a, target) <= _best_dist(b, target) else b
 
-    edges = np.linspace(0, n, 4, dtype=np.float64)
-    e1, e2 = int(np.floor(edges[1])), int(np.floor(edges[2]))
+    edges = np.linspace(0, n, 4)
+    e1, e2 = int(edges[1]), int(edges[2])
     return (_s(*range(0, e1)), _s(*range(e1, e2)), _s(*range(e2, n)))
 
 def distribution_from_hist(
-    hist: np.ndarray, lower: int, upper: int, levels: int, exp_value: float
+    hist: np.ndarray, lower: int, upper: int, levels: int, exp_value: float, mode: int = 0
 ) -> np.ndarray:
-    """從灰階直方圖預測量化後的結果比例"""
+    """從灰階直方圖預測量化後的結果比例 (多模式優化版)"""
     levels = max(2, int(levels))
-    lower = max(0, min(254, int(lower)))
+    lower = max(0, min(240, int(lower)))
     upper = max(lower + 1, min(255, int(upper)))
-    values = np.arange(256, dtype=np.float64)
-    clipped = np.clip(values, lower, upper)
-    normalized = (clipped - float(lower)) / float(upper - lower)
-    gamma = float(np.power(2.0, float(exp_value)))
-    mapped = np.power(normalized, gamma)
-    indices = np.floor(mapped * levels)
-    indices = np.clip(indices, 0, levels - 1).astype(np.int32)
+    
+    inv_range = 1.0 / (upper - lower)
+    x = np.clip((_VALUES_256 - lower) * inv_range, 0, 1)
+    
+    # 根據模式決定映射曲線
+    gamma = 2.0 ** float(exp_value)
+    
+    if mode == 0: # Gamma 模式
+        mapped = x ** gamma
+    elif mode == 1: # Sigmoid (S-Curve) 模式
+        # 使用 Hill Equation: y = x^g / (x^g + (1-x)^g)
+        eps = 1e-6
+        x_g = np.power(x, gamma)
+        inv_x_g = np.power(1.0 - x + eps, gamma)
+        mapped = x_g / (x_g + inv_x_g)
+    elif mode == 2: # Log (對數) 模式
+        # y = ln(1 + kx) / ln(1 + k)
+        k = (exp_value + 2.0) * 10.0 # 簡單映射 k 值
+        if k < 0.1: k = 0.1
+        mapped = np.log(1.0 + k * x) / np.log(1.0 + k)
+    else:
+        mapped = x
+        
+    indices = (mapped * levels).astype(np.int32)
+    indices[indices >= levels] = levels - 1
+    
     counts = np.bincount(indices, weights=hist, minlength=levels).astype(np.float64)
-    total = float(counts.sum())
-    if total <= 0:
-        return np.zeros(3, dtype=np.float64)
+    total = counts.sum()
+    if total <= 0: return np.zeros(3)
     
     if levels == 2:
-        return np.array([counts[0]/total, 0.0, counts[1]/total], dtype=np.float64)
+        return np.array([counts[0]/total, 0.0, counts[1]/total])
 
-    level_edges = np.linspace(0, levels, 4, dtype=np.float64)
-    edge1 = int(np.floor(level_edges[1]))
-    edge2 = int(np.floor(level_edges[2]))
-    low = float(np.sum(counts[:edge1]) / total)
-    mid = float(np.sum(counts[edge1:edge2]) / total)
-    high = float(np.sum(counts[edge2:]) / total)
-    return np.array([low, mid, high], dtype=np.float64)
+    level_edges = np.linspace(0, levels, 4)
+    e1, e2 = int(level_edges[1]), int(level_edges[2])
+    return np.array([np.sum(counts[:e1]), np.sum(counts[e1:e2]), np.sum(counts[e2:])]) / total
 
 def optimize_balance_params(
     gray: np.ndarray,
-    target: tuple[float, float, float], # (White, Gray, Black)
+    target: tuple[float, float, float],
     current_min: int,
     current_max: int,
     current_exp: float,
     levels_count: int,
-    hysteresis: float = 0.0
-) -> tuple[int, int, float]:
-    """全自動分析最佳平衡參數的核心算法 - 多解析度階層搜尋 (Multi-resolution Search)"""
+    hysteresis: float = 0.0,
+    current_mode: int = 0,
+    search_all_modes: bool = False
+) -> tuple[int, int, float, int]:
+    """全自動分析最佳平衡參數與曲線模式 (多模式極速版)"""
     
-    # 記錄呼叫次數，用於定期「強制校正與抖動探索」
-    optimize_balance_params._call_count = getattr(optimize_balance_params, '_call_count', 0) + 1
-    force_recalibrate = (optimize_balance_params._call_count % 15 == 0)
-    
-    hist = np.bincount(gray.reshape(-1).astype(np.uint8), minlength=256).astype(np.float64)
-    total = float(hist.sum())
-    if total <= 0: return current_min, current_max, current_exp
+    hist = np.bincount(gray.ravel(), minlength=256).astype(np.float64)
+    total = hist.sum()
+    if total <= 0: return current_min, current_max, current_exp, current_mode
 
     levels = max(2, int(levels_count))
-    t_white, t_gray, t_black = target
-    t_total = t_white + t_gray + t_black
-    if t_total <= 0: return current_min, current_max, current_exp
-    
+    t_black, t_gray, t_white = target
+    t_total = t_black + t_gray + t_white
+    if t_total <= 0: return current_min, current_max, current_exp, current_mode
     target_ratios = np.array([t_black, t_gray, t_white]) / t_total
     
-    # 評估目前參數的 Loss (防震盪)
-    current_dist = distribution_from_hist(hist, current_min, current_max, levels, current_exp)
-    diff_curr = current_dist - target_ratios
-    current_loss = float(np.dot(diff_curr, diff_curr))
-    
-    # 定期校正時不使用主場優勢 (hysteresis=0)，確保隨時都有機會逃離局部最佳解
-    eff_hysteresis = 0.0 if force_recalibrate else hysteresis
-    best_loss = current_loss - eff_hysteresis
-    best_params = (current_min, current_max, current_exp)
+    # 評估目前參數 Loss
+    current_dist = distribution_from_hist(hist, current_min, current_max, levels, current_exp, current_mode)
+    best_loss = np.sum((current_dist - target_ratios)**2) - hysteresis
+    best_params = (current_min, current_max, current_exp, current_mode)
 
-    # --- 階段一：粗算 (Coarse Search) ---
-    # 鋪設覆蓋全域的稀疏網格
-    lo_coarse = np.linspace(0, 240, 12, dtype=int)
-    hi_coarse = np.linspace(10, 255, 12, dtype=int)
-    ex_coarse = np.linspace(-2.0, 2.0, 12)
-    
-    coarse_best_params = best_params
-    coarse_best_loss = best_loss
-    
-    for lo in lo_coarse:
-        if lo > 240: continue
-        for hi in hi_coarse:
-            if hi <= lo + 4: continue
-            if hi > 255: continue
-            for ex in ex_coarse:
-                r_now = distribution_from_hist(hist, lo, hi, levels, float(ex))
-                diff = r_now - target_ratios
-                l = float(np.dot(diff, diff))
-                if l < coarse_best_loss:
-                    coarse_best_loss = l
-                    coarse_best_params = (lo, hi, float(ex))
-
-    # --- 階段二：精算 (Fine Search) ---
-    # 圍繞粗算結果鋪設精細的網格
-    c_lo, c_hi, c_ex = coarse_best_params
-    
-    # 定期校正時，故意給參數微小的隨機抖動 (Nudge)，打破對稱性以探索邊緣極限
-    if force_recalibrate:
-        c_lo = max(0, min(240, c_lo + int(np.random.randint(-6, 7))))
-        c_hi = max(c_lo + 5, min(255, c_hi + int(np.random.randint(-6, 7))))
-        c_ex = max(-2.0, min(2.0, c_ex + float(np.random.uniform(-0.25, 0.25))))
-
-    lo_fine = np.linspace(max(0, c_lo - 24), min(240, c_lo + 24), 10, dtype=int)
-    hi_fine = np.linspace(max(c_lo + 5, c_hi - 24), min(255, c_hi + 24), 10, dtype=int)
-    ex_fine = np.linspace(max(-2.0, c_ex - 0.4), min(2.0, c_ex + 0.4), 10)
-
-    for lo in lo_fine:
-        if lo > 240: continue
-        for hi in hi_fine:
-            if hi <= lo + 4: continue
-            if hi > 255: continue
-            for ex in ex_fine:
-                r_now = distribution_from_hist(hist, lo, hi, levels, float(ex))
-                diff = r_now - target_ratios
-                l = float(np.dot(diff, diff))
-                if l < best_loss:
-                    best_loss = l
-                    best_params = (lo, hi, float(ex))
+    def _search(lo_list, hi_list, ex_list, mode_list, b_l, b_p):
+        for m in mode_list:
+            for lo in lo_list:
+                for hi in hi_list:
+                    if hi <= lo + 2: continue
+                    inv_r = 1.0 / (hi - lo)
+                    x_base = np.clip((_VALUES_256 - lo) * inv_r, 0, 1)
                     
+                    for ex in ex_list:
+                        gamma = 2.0 ** ex
+                        # 核心映射計算
+                        if m == 0: mapped = x_base ** gamma
+                        elif m == 1:
+                            x_g = x_base ** gamma
+                            mapped = x_g / (x_g + (1.0 - x_base + 1e-6)**gamma)
+                        else:
+                            k = (ex + 2.0) * 10.0
+                            mapped = np.log(1.0 + k * x_base) / np.log(1.0 + k)
+                            
+                        idx = (mapped * levels).astype(np.int32)
+                        idx[idx >= levels] = levels - 1
+                        cnts = np.bincount(idx, weights=hist, minlength=levels)
+                        dist = np.array([np.sum(cnts[:levels//3]), 
+                                         np.sum(cnts[levels//3:2*levels//3]), 
+                                         np.sum(cnts[2*levels//3:])]) / total
+                        loss = np.sum((dist - target_ratios)**2)
+                        if loss < b_l:
+                            b_l = loss
+                            b_p = (int(lo), int(hi), float(ex), int(m))
+        return b_l, b_p
+
+    # 決定要搜尋的模式
+    modes_to_search = [0, 1, 2] if search_all_modes else [current_mode]
+
+    # 階段一：粗算
+    lo_c = np.linspace(0, 240, 10, dtype=int)
+    hi_c = np.linspace(20, 255, 10, dtype=int)
+    ex_c = np.linspace(-1.5, 1.5, 8)
+    best_loss, best_params = _search(lo_c, hi_c, ex_c, modes_to_search, best_loss, best_params)
+
+    # 階段二：精算
+    c_lo, c_hi, c_ex, c_m = best_params
+    lo_f = np.linspace(max(0, c_lo - 20), min(240, c_lo + 20), 8, dtype=int)
+    hi_f = np.linspace(max(c_lo + 5, c_hi - 20), min(255, c_hi + 20), 8, dtype=int)
+    ex_f = np.linspace(max(-2.0, c_ex - 0.3), min(2.0, c_ex + 0.3), 8)
+    best_loss, best_params = _search(lo_f, hi_f, ex_f, [c_m], best_loss, best_params)
+
     return best_params
