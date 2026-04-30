@@ -22,7 +22,7 @@ class CaptureService:
         # 不要呼叫 self._sct.close()，否則會因為跨執行緒存取 thread-local variables 報錯
         self._sct = mss.mss()
 
-    def capture_region(
+    def _grab_bgra(
         self,
         x: int,
         y: int,
@@ -37,9 +37,28 @@ class CaptureService:
         }
 
         shot = self._sct.grab(monitor)
-        # 使用更快的 frombuffer 方式，避免 np.array 的二次拷貝
-        img = np.frombuffer(shot.bgra, dtype=np.uint8).reshape((shot.height, shot.width, 4))
-        return img[:, :, :3]
+        return np.frombuffer(shot.bgra, dtype=np.uint8).reshape((shot.height, shot.width, 4))
+
+    def capture_region(
+        self,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> np.ndarray:
+        """Capture BGR frame as contiguous array for downstream OpenCV usage."""
+        bgra = self._grab_bgra(x, y, width, height)
+        return np.ascontiguousarray(bgra[:, :, :3])
+
+    def capture_region_bgra(
+        self,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> np.ndarray:
+        """Capture BGRA frame (view on MSS buffer) to avoid extra conversion copies."""
+        return self._grab_bgra(x, y, width, height)
 
     def set_affinity(self, hwnd: int | None, enabled: bool) -> bool:
         """設定視窗隱身屬性。enabled=True 則擷取時不可見。"""

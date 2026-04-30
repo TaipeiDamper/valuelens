@@ -176,6 +176,7 @@ class CaptureWorker(QThread):
         from valuelens.core.scene_detector import RandomSceneDetector
         self.detector = RandomSceneDetector(threshold=settings.scene_threshold)
         self._last_full_sync_ts = 0.0
+        self._idle_streak = 0
 
     def update_context(self, ctx):
         self.mutex.lock()
@@ -218,7 +219,17 @@ class CaptureWorker(QThread):
                     
                     if is_changed or is_timeout:
                         self._last_full_sync_ts = mon_now
+                        self._idle_streak = 0
                         self.frame_ready.emit(frame, gray, t0, cap_time)
+                    else:
+                        self._idle_streak = min(self._idle_streak + 1, 30)
             
-            # 控制最高擷取頻率，避免過度消耗 CPU
-            time.sleep(max(0.001, self.settings.refresh_ms / 1000.0))
+            # Adaptive capture pacing: static scenes use slower polling to reduce CPU.
+            base_interval = max(0.001, self.settings.refresh_ms / 1000.0)
+            if self._idle_streak >= 12:
+                sleep_s = min(0.10, base_interval * 3.0)
+            elif self._idle_streak >= 6:
+                sleep_s = min(0.06, base_interval * 2.0)
+            else:
+                sleep_s = base_interval
+            time.sleep(sleep_s)
