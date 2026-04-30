@@ -148,6 +148,33 @@ py::array_t<double> distribution_from_indices(
     return out;
 }
 
+py::array_t<uint8_t> color_map_rgb(
+    py::array_t<uint8_t, py::array::c_style | py::array::forcecast> indices,
+    py::array_t<uint8_t, py::array::c_style | py::array::forcecast> lut_bgr
+) {
+    auto idx = indices.unchecked<2>();
+    auto lut = lut_bgr.unchecked<2>();
+    if (lut.shape(0) < 256 || lut.shape(1) < 3) {
+        throw std::invalid_argument("lut_bgr must have shape (256, 3)");
+    }
+
+    const py::ssize_t h = idx.shape(0);
+    const py::ssize_t w = idx.shape(1);
+    py::array_t<uint8_t> out_rgb(std::vector<py::ssize_t>{h, w, 3});
+    auto out = out_rgb.mutable_unchecked<3>();
+
+    for (py::ssize_t y = 0; y < h; ++y) {
+        for (py::ssize_t x = 0; x < w; ++x) {
+            const uint8_t v = idx(y, x);
+            out(y, x, 0) = lut(v, 2);
+            out(y, x, 1) = lut(v, 1);
+            out(y, x, 2) = lut(v, 0);
+        }
+    }
+
+    return out_rgb;
+}
+
 } // namespace
 
 PYBIND11_MODULE(valuelens_native, m) {
@@ -169,6 +196,12 @@ PYBIND11_MODULE(valuelens_native, m) {
         &distribution_from_indices,
         py::arg("indices"),
         py::arg("levels")
+    );
+    m.def(
+        "color_map_rgb",
+        &color_map_rgb,
+        py::arg("indices"),
+        py::arg("lut_bgr")
     );
 }
 

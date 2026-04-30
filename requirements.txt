@@ -4,3 +4,9 @@ opencv-python>=4.10
 mss>=9.0
 keyboard>=0.13
 pytest>=8.0
+pybind11>=2.12
+
+# Optional Windows DXGI capture benchmark backends.
+# Install manually only when comparing capture backends:
+# dxcam
+# bettercam

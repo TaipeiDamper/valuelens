@@ -13,6 +13,63 @@ except Exception:
 
 # Cache for the LUT to avoid re-calculating if parameters haven't changed
 _CURRENT_QUANT_LUT: tuple[tuple, np.ndarray] | None = None
+_CURRENT_COLOR_LUT: tuple[tuple, np.ndarray] | None = None
+
+
+def _palette_key(palette: list[tuple[int, int, int]] | None, levels: int) -> tuple | None:
+    if not palette or len(palette) != levels:
+        return None
+    return tuple((int(r), int(g), int(b)) for r, g, b in palette)
+
+
+def get_color_lut_bgr(
+    levels: int,
+    display_min: int,
+    display_max: int,
+    display_exp: float,
+    palette: list[tuple[int, int, int]] | None = None,
+    edge_mix: int = 0,
+    edge_active: bool = False,
+) -> np.ndarray:
+    """Return a 256-entry BGR color LUT for quantized indices."""
+    global _CURRENT_COLOR_LUT
+    levels = max(2, int(levels))
+    mix = float(edge_mix) / 100.0 if edge_active else 0.0
+    params = (
+        levels,
+        int(display_min),
+        int(display_max),
+        float(display_exp),
+        _palette_key(palette, levels),
+        float(mix),
+    )
+    if _CURRENT_COLOR_LUT is not None and _CURRENT_COLOR_LUT[0] == params:
+        return _CURRENT_COLOR_LUT[1]
+
+    lut_inputs = np.arange(levels, dtype=np.float32)
+    norm_lut = lut_inputs / (levels - 1)
+    if display_exp != 0:
+        gamma_display = float(np.power(2.0, float(display_exp)))
+        norm_lut = np.power(norm_lut, gamma_display)
+    out_lut = (norm_lut * (display_max - display_min) + display_min).astype(np.uint8)
+
+    full_lut_bgr = np.zeros((256, 3), dtype=np.uint8)
+    if palette and len(palette) == levels:
+        for i, color in enumerate(palette):
+            r, g, b = color
+            full_lut_bgr[i] = [
+                int(b * (1.0 - mix) + 255.0 * mix),
+                int(g * (1.0 - mix) + 255.0 * mix),
+                int(r * (1.0 - mix) + 255.0 * mix),
+            ]
+    else:
+        for i in range(levels):
+            val = out_lut[i]
+            mixed_val = int(val * (1.0 - mix) + 255.0 * mix)
+            full_lut_bgr[i] = [mixed_val, mixed_val, mixed_val]
+
+    _CURRENT_COLOR_LUT = (params, full_lut_bgr)
+    return full_lut_bgr
 
 def get_quantization_lut(levels: int, min_val: int, max_val: int, exp_val: float, curve_mode: int = 0) -> np.ndarray:
     global _CURRENT_QUANT_LUT
@@ -109,6 +166,16 @@ def native_distribution_from_indices(indices: np.ndarray, levels: int) -> np.nda
     try:
         out = _native_quant.distribution_from_indices(indices, max(2, int(levels)))
         return np.asarray(out, dtype=np.float64)
+    except Exception:
+        return None
+
+
+def native_color_map_rgb(indices: np.ndarray, lut_bgr: np.ndarray) -> np.ndarray | None:
+    """Return RGB output from quantized indices and BGR LUT using native module."""
+    if _native_quant is None or not hasattr(_native_quant, "color_map_rgb"):
+        return None
+    try:
+        return np.asarray(_native_quant.color_map_rgb(indices, lut_bgr), dtype=np.uint8)
     except Exception:
         return None
 
@@ -302,55 +369,48 @@ def quantize_gray_with_indices(
     ctx.indices = cv2.LUT(ctx.working_gray, lut).astype(np.uint8)
     _mark("final_index_ms")
     
-    # --- 顯示輸出映射 (Display Mapping) ---
     d_min = display_min if display_min is not None else 0
     d_max = display_max if display_max is not None else 255
     d_exp = display_exp if display_exp is not None else 0
-    
-    lut_inputs = np.arange(levels, dtype=np.float32)
-    norm_lut = lut_inputs / (levels - 1)
-    if d_exp != 0:
-        gamma_display = float(np.power(2.0, float(d_exp)))
-        norm_lut = np.power(norm_lut, gamma_display)
-    out_lut = (norm_lut * (d_max - d_min) + d_min).astype(np.uint8)
+    full_lut_bgr = get_color_lut_bgr(
+        ctx.levels,
+        int(d_min),
+        int(d_max),
+        float(d_exp),
+        palette=palette,
+        edge_mix=edge_mix,
+        edge_active=ctx.edges is not None,
+    )
     _mark("display_lut_ms")
 
-    # --- 建立彩色 3-Channel LUT ---
-    # 我們在這裡一次搞定所有顏色映射與 Edge Mix
-    full_lut_bgr = np.zeros((256, 3), dtype=np.uint8)
-    mix = (edge_mix / 100.0) if ctx.edges is not None else 0.0
-    
-    if palette and len(palette) == levels:
-        for i, color in enumerate(palette):
-            r, g, b = color
-            full_lut_bgr[i] = [
-                int(b * (1.0 - mix) + 255.0 * mix),
-                int(g * (1.0 - mix) + 255.0 * mix),
-                int(r * (1.0 - mix) + 255.0 * mix)
-            ]
+    native_rgb = None
+    if edge_color is None and ctx.morph_mask is None:
+        native_rgb = native_color_map_rgb(ctx.indices, full_lut_bgr)
+
+    if native_rgb is not None:
+        out_rgb = native_rgb
+        _mark("color_map_ms")
+        _mark("edge_morph_apply_ms")
+        _mark("rgb_convert_ms")
     else:
-        for i in range(levels):
-            val = out_lut[i]
-            mixed_val = int(val * (1.0 - mix) + 255.0 * mix)
-            full_lut_bgr[i] = [mixed_val, mixed_val, mixed_val]
+        # 直接進行彩色查表 (NumPy 方式)
+        out_bgr = full_lut_bgr[ctx.indices]
+        _mark("color_map_ms")
 
-    # 直接進行彩色查表 (NumPy 方式)
-    out_bgr = full_lut_bgr[ctx.indices]
-    _mark("color_map_ms")
-    
-    # 處理邊緣顏色
-    if ctx.edges is not None and edge_color:
-        ec_bgr = edge_color[::-1] # RGB -> BGR
-        out_bgr[ctx.edges > 0] = ec_bgr
+        # 處理邊緣顏色
+        if ctx.edges is not None and edge_color:
+            ec_bgr = edge_color[::-1] # RGB -> BGR
+            out_bgr[ctx.edges > 0] = ec_bgr
 
-    # 處理形態學遮罩
-    if ctx.morph_mask is not None:
-        out_bgr[ctx.morph_mask] = 0
-    _mark("edge_morph_apply_ms")
-        
-    # 在背景執行緒完成 RGB 轉換，徹底解放主執行緒
-    out_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
-    _mark("rgb_convert_ms")
+        # 處理形態學遮罩
+        if ctx.morph_mask is not None:
+            mask = np.ascontiguousarray(ctx.morph_mask)
+            np.copyto(out_bgr, 0, where=mask[:, :, None])
+        _mark("edge_morph_apply_ms")
+
+        # 在背景執行緒完成 RGB 轉換，徹底解放主執行緒
+        out_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+        _mark("rgb_convert_ms")
     if profile is not None:
         profile["total_ms"] = (time.perf_counter() - t_total) * 1000.0
     
