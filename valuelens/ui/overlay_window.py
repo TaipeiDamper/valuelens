@@ -589,11 +589,8 @@ class OverlayWindow(QMainWindow):
         self.panel.curve_mode.blockSignals(False)
         
         # 同步更新本地設定
-        self.store.update(min_value=lower, max_value=upper, exp_value=exp_value)
+        self.store.update(min_value=lower, max_value=upper, exp_value=exp_value, curve_mode=curve_mode)
     def on_auto_balance_target_requested(self, ratios: tuple[float, float, float]) -> None:
-        if self.auto_balance_worker.is_busy():
-            return
-            
         source_gray = self._last_gray_frame
         if self._is_static_mode and self._use_global_calc and self._full_image_gray is not None:
             source_gray = self._full_image_gray
@@ -1017,7 +1014,7 @@ class OverlayWindow(QMainWindow):
             ui_end_time = time.perf_counter()
             
             # --- Profiling 測速節流輸出 ---
-            PROFILING = True
+            PROFILING = False
             if PROFILING:
                 if not hasattr(self, '_last_profile_ts'):
                     self._last_profile_ts = 0.0

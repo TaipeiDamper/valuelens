@@ -11,8 +11,8 @@ from valuelens.core.quantize import quantize_gray_with_indices
 def run_headless_test(video_path="test_pattern.mp4"):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print("Error: Could not open test video.")
-        return
+        print(f"SKIP: Could not open test video: {video_path}")
+        return 0
 
     frame_idx = 0
     print(f"{'Frame':<8} | {'Black %':<10} | {'Gray %':<10} | {'White %':<10} | {'Status'}")
@@ -28,7 +28,7 @@ def run_headless_test(video_path="test_pattern.mp4"):
         
         # 模擬 3 階量化設定
         # levels=3, min=20, max=235 (排除極端值)
-        out, indices, edges = quantize_gray_with_indices(
+        _, indices, _, _ = quantize_gray_with_indices(
             frame, 
             levels=3, 
             min_value=64,   # 設定在 128 左右的中間點
@@ -58,6 +58,7 @@ def run_headless_test(video_path="test_pattern.mp4"):
 
     cap.release()
     print("\nTest Complete.")
+    return 0
 
 if __name__ == "__main__":
-    run_headless_test()
+    raise SystemExit(run_headless_test())

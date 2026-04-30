@@ -215,6 +215,14 @@ class MorphFilter(BaseFilter):
             ctx.morph_mask = morph_grad > threshold
 
 
+FILTERS: dict[str, BaseFilter] = {
+    "blur": BlurFilter(),
+    "dither": DitherFilter(),
+    "edge": EdgeFilter(),
+    "morph": MorphFilter(),
+}
+
+
 def quantize_gray_with_indices(
     bgr: np.ndarray,
     levels: int,
@@ -255,14 +263,6 @@ def quantize_gray_with_indices(
         
     true_indices = cv2.LUT(stats_gray, lut)
     true_counts = np.bincount(true_indices.ravel(), minlength=levels)
-    
-    # 註冊可供調配的積木庫
-    FILTERS = {
-        "blur": BlurFilter(),
-        "dither": DitherFilter(),
-        "edge": EdgeFilter(),
-        "morph": MorphFilter(),
-    }
     
     kwargs = {
         "blur_radius": blur_radius,

@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 import numpy as np
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from valuelens.core.quantize import has_native_acceleration, quantize_gray_with_indices
 
@@ -9,7 +15,7 @@ def main() -> int:
     rng = np.random.default_rng(1234)
     frame = rng.integers(0, 256, size=(240, 320, 3), dtype=np.uint8)
 
-    out_a, idx_a, _ = quantize_gray_with_indices(
+    out_a, idx_a, _, _ = quantize_gray_with_indices(
         frame,
         5,
         min_value=16,
@@ -24,7 +30,7 @@ def main() -> int:
         morph_enabled=False,
         morph_strength=1,
     )
-    out_b, idx_b, _ = quantize_gray_with_indices(
+    out_b, idx_b, _, _ = quantize_gray_with_indices(
         frame,
         5,
         min_value=16,

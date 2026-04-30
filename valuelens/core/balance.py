@@ -3,6 +3,43 @@ import numpy as np
 
 # 預分配常用陣列以提升速度
 _VALUES_256 = np.arange(256, dtype=np.float32)
+_DEFAULT_WGB_TARGET = np.array([0.7, 0.2, 0.1], dtype=np.float64)
+
+
+def _best_partition_distance(wgb: np.ndarray) -> float:
+    total = float(wgb.sum()) or 1.0
+    norm = wgb / total
+    best = float("inf")
+    for p in itertools.permutations(_DEFAULT_WGB_TARGET):
+        d = float(np.sum((norm - np.asarray(p)) ** 2))
+        if d < best:
+            best = d
+    return best
+
+
+def _fold_level_values_to_wgb(values: np.ndarray) -> np.ndarray:
+    """Fold low-to-high level values into W:G:B order."""
+    v = values.astype(np.float64, copy=False)[::-1]
+    n = int(v.size)
+
+    if n == 0:
+        return np.zeros(3, dtype=np.float64)
+    if n == 2:
+        return np.array([v[0], 0.0, v[1]], dtype=np.float64)
+    if n == 3:
+        return np.array([v[0], v[1], v[2]], dtype=np.float64)
+    if n == 5:
+        a = np.array([v[0] + v[1], v[2] + v[3], v[4]], dtype=np.float64)
+        b = np.array([v[0], v[1] + v[2], v[3] + v[4]], dtype=np.float64)
+        return a if _best_partition_distance(a) <= _best_partition_distance(b) else b
+    if n == 8:
+        a = np.array([v[0] + v[1], v[2] + v[3] + v[4], v[5] + v[6] + v[7]], dtype=np.float64)
+        b = np.array([v[0] + v[1] + v[2], v[3] + v[4] + v[5], v[6] + v[7]], dtype=np.float64)
+        return a if _best_partition_distance(a) <= _best_partition_distance(b) else b
+
+    edges = np.linspace(0, n, 4)
+    e1, e2 = int(edges[1]), int(edges[2])
+    return np.array([v[:e1].sum(), v[e1:e2].sum(), v[e2:].sum()], dtype=np.float64)
 
 def calc_level_distribution(gray: np.ndarray | None, levels: int) -> list[float]:
     """計算給定灰階圖在特定階調數下的分佈比例 (0.0~100.0)"""
@@ -30,42 +67,8 @@ def calc_indices_distribution(indices: np.ndarray | None, levels: int) -> list[f
 
 def levels_to_wgb(values: list[float]) -> tuple[float, float, float]:
     """將 N 階層分佈折疊為 (white%, gray%, black%)。"""
-    v = list(reversed(values))
-    n = len(v)
-
-    def _s(*idx):
-        return float(sum(v[i] for i in idx if 0 <= i < n))
-
-    def _best_dist(wgb, target_base):
-        total = sum(wgb) or 1.0
-        norm = [val / total for val in wgb]
-        t_total = sum(target_base)
-        tn = [val / t_total for val in target_base]
-        best = float("inf")
-        for p in itertools.permutations(tn):
-            d = sum((norm[i] - p[i])**2 for i in range(3))
-            if d < best:
-                best = d
-        return best
-
-    if n == 2:
-        return (_s(0), 0.0, _s(1))
-    if n == 3:
-        return (_s(0), _s(1), _s(2))
-    if n == 5:
-        target = (0.7, 0.2, 0.1)
-        a = (_s(0, 1), _s(2, 3), _s(4))
-        b = (_s(0),    _s(1, 2), _s(3, 4))
-        return a if _best_dist(a, target) <= _best_dist(b, target) else b
-    if n == 8:
-        target = (0.7, 0.2, 0.1)
-        a = (_s(0, 1),    _s(2, 3, 4), _s(5, 6, 7))
-        b = (_s(0, 1, 2), _s(3, 4, 5), _s(6, 7))
-        return a if _best_dist(a, target) <= _best_dist(b, target) else b
-
-    edges = np.linspace(0, n, 4)
-    e1, e2 = int(edges[1]), int(edges[2])
-    return (_s(*range(0, e1)), _s(*range(e1, e2)), _s(*range(e2, n)))
+    folded = _fold_level_values_to_wgb(np.asarray(values, dtype=np.float64))
+    return float(folded[0]), float(folded[1]), float(folded[2])
 
 def distribution_from_hist(
     hist: np.ndarray, lower: int, upper: int, levels: int, exp_value: float, mode: int = 0
@@ -103,13 +106,7 @@ def distribution_from_hist(
     counts = np.bincount(indices, weights=hist, minlength=levels).astype(np.float64)
     total = counts.sum()
     if total <= 0: return np.zeros(3)
-    
-    if levels == 2:
-        return np.array([counts[0]/total, 0.0, counts[1]/total])
-
-    level_edges = np.linspace(0, levels, 4)
-    e1, e2 = int(level_edges[1]), int(level_edges[2])
-    return np.array([np.sum(counts[:e1]), np.sum(counts[e1:e2]), np.sum(counts[e2:])]) / total
+    return _fold_level_values_to_wgb(counts) / total
 
 def optimize_balance_params(
     gray: np.ndarray,
@@ -129,10 +126,10 @@ def optimize_balance_params(
     if total <= 0: return current_min, current_max, current_exp, current_mode
 
     levels = max(2, int(levels_count))
-    t_black, t_gray, t_white = target
-    t_total = t_black + t_gray + t_white
+    t_white, t_gray, t_black = target
+    t_total = t_white + t_gray + t_black
     if t_total <= 0: return current_min, current_max, current_exp, current_mode
-    target_ratios = np.array([t_black, t_gray, t_white]) / t_total
+    target_ratios = np.array([t_white, t_gray, t_black]) / t_total
     
     # 評估目前參數 Loss
     current_dist = distribution_from_hist(hist, current_min, current_max, levels, current_exp, current_mode)
@@ -161,9 +158,7 @@ def optimize_balance_params(
                         idx = (mapped * levels).astype(np.int32)
                         idx[idx >= levels] = levels - 1
                         cnts = np.bincount(idx, weights=hist, minlength=levels)
-                        dist = np.array([np.sum(cnts[:levels//3]), 
-                                         np.sum(cnts[levels//3:2*levels//3]), 
-                                         np.sum(cnts[2*levels//3:])]) / total
+                        dist = _fold_level_values_to_wgb(cnts) / total
                         loss = np.sum((dist - target_ratios)**2)
                         if loss < b_l:
                             b_l = loss

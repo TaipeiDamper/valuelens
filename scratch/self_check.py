@@ -36,8 +36,15 @@ def test_project_assets():
         window = OverlayWindow(settings=store.settings)
         print("[Self-Check] PASS: OverlayWindow initialized successfully.")
         
-        window.calc_worker.stop()
-        window.auto_balance_worker.stop()
+        if hasattr(window, "calc_worker"):
+            window.calc_worker.stop()
+        if hasattr(window, "auto_balance_worker"):
+            window.auto_balance_worker.stop()
+        if hasattr(window, "cap_worker"):
+            window.cap_worker.stop()
+        window.close()
+        window.deleteLater()
+        app.processEvents()
         return True
     except Exception as e:
         print(f"[Self-Check] FAIL in logic test: {e}")
