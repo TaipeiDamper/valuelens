@@ -34,7 +34,7 @@ class AutoBalanceWorker(QThread):
         self.cond.wakeOne()
         self.mutex.unlock()
         self.quit()
-        self.wait(2000)
+        self.wait(200)
 
     def run(self) -> None:
         while True:
@@ -60,10 +60,25 @@ class AutoBalanceWorker(QThread):
             self.finished.emit(best_params[0], best_params[1], best_params[2])
             self._busy = False
 
+
+class BufferManager:
+    """記憶體緩衝池，用於重複使用相同大小的 NumPy 矩陣。"""
+    def __init__(self):
+        self._pool: dict[tuple, np.ndarray] = {}
+
+    def get_buffer(self, shape: tuple, dtype: np.dtype) -> np.ndarray:
+        key = (shape, dtype)
+        if key not in self._pool:
+            self._pool[key] = np.zeros(shape, dtype=dtype)
+        return self._pool[key]
+
+    def clear(self):
+        self._pool.clear()
+
 class ImageProcessWorker(QThread):
     """背景影像處理運算執行緒，負責執行耗時的 quantize_gray_with_indices。"""
-    # finished 信號：帶回 logic_quantized, logic_indices, edges, t_computed
-    finished = Signal(np.ndarray, np.ndarray, object, float)
+    # (量化圖, 索引圖, 邊緣圖, 真實比例計數, 運算時間)
+    finished = Signal(np.ndarray, np.ndarray, object, np.ndarray, float)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -72,6 +87,7 @@ class ImageProcessWorker(QThread):
         self._busy = False
         self._pending_task = None
         self._is_stopping = False
+        self.buffer_manager = BufferManager()
         self.start()  # 啟動並進入休眠等待
 
     def is_busy(self) -> bool:
@@ -92,7 +108,7 @@ class ImageProcessWorker(QThread):
         self.cond.wakeOne()
         self.mutex.unlock()
         self.quit()
-        self.wait(2000)
+        self.wait(200)
 
     def run(self) -> None:
         while True:
@@ -117,7 +133,8 @@ class ImageProcessWorker(QThread):
             eff_dither = settings.dither_strength if settings.dither_enabled else 0
             eff_edge = settings.edge_strength if settings.edge_enabled else 0
             
-            logic_quantized, logic_indices, edges = quantize_gray_with_indices(
+            # --- 執行量化核心 (V2 帶有真實統計) ---
+            logic_quantized, logic_indices, edges, true_counts = quantize_gray_with_indices(
                 frame,
                 settings.levels,
                 settings.min_value,
@@ -133,9 +150,52 @@ class ImageProcessWorker(QThread):
                 morph_enabled=settings.morph_enabled,
                 morph_strength=settings.morph_strength,
                 morph_threshold=settings.morph_threshold,
+                palette=getattr(settings, 'custom_palette', None),
+                edge_mix=settings.edge_mix if settings.edge_enabled else 0,
+                edge_color=settings.edge_color,
+                buffer_manager=self.buffer_manager,
             )
             t_computed = time.perf_counter() - t_start
             
-            self.finished.emit(logic_quantized, logic_indices, edges, t_computed)
+            self.finished.emit(logic_quantized, logic_indices, edges, true_counts, t_computed)
+            self._busy = False
+class CaptureWorker(QThread):
+    """專職擷取的執行緒，避免 mss 阻塞主執行緒。"""
+    frame_ready = Signal(np.ndarray, np.ndarray, float, float) # color, gray, timestamp, cap_time
+
+    def __init__(self, frame_source, settings):
+        super().__init__()
+        self.frame_source = frame_source
+        self.settings = settings
+        self._is_running = True
+        self._ctx = None
+        self.mutex = QMutex()
+
+    def update_context(self, ctx):
+        self.mutex.lock()
+        self._ctx = ctx
+        self.mutex.unlock()
+
+    def stop(self):
+        self._is_running = False
+        self.wait(200)
+
+    def run(self):
+        # 讓底層 CaptureService 在這個新的執行緒中建立專屬的 mss 資源
+        if hasattr(self.frame_source, "capture") and hasattr(self.frame_source.capture, "bind_to_current_thread"):
+            self.frame_source.capture.bind_to_current_thread()
+
+        while self._is_running:
+            self.mutex.lock()
+            ctx = self._ctx
+            self.mutex.unlock()
+
+            if ctx:
+                t0 = time.perf_counter()
+                frame, gray = self.frame_source.get_frame(ctx)
+                cap_time = (time.perf_counter() - t0) * 1000
+                if frame is not None:
+                    self.frame_ready.emit(frame, gray, t0, cap_time)
             
-        self._busy = False
+            # 控制最高擷取頻率，避免過度消耗 CPU
+            time.sleep(max(0.001, self.settings.refresh_ms / 1000.0))

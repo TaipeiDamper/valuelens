@@ -115,8 +115,12 @@ def quantize_gray(
     morph_strength: int = 1,
     morph_threshold: int = 35,
 ) -> np.ndarray:
-    out_gray, _, _ = quantize_gray_with_indices(
-        bgr, levels, min_value, max_value, exp_value,
+    out_gray, _, _, _ = quantize_gray_with_indices(
+        bgr,
+        levels,
+        min_value=min_value,
+        max_value=max_value,
+        exp_value=exp_value,
         display_min=display_min,
         display_max=display_max,
         display_exp=display_exp,
@@ -140,11 +144,12 @@ class FilterContext:
     影像處理管線的 Context 封裝箱（狀態管理者）。
     負責存放原始影像與各階段衍生資料，確保資料流向明確。
     """
-    def __init__(self, bgr: np.ndarray, levels: int, min_val: int, max_val: int, exp_val: float):
+    def __init__(self, bgr: np.ndarray, levels: int, min_val: int, max_val: int, exp_val: float, buffer_manager: Any = None):
         self.levels = max(2, int(levels))
         self.min_val = int(min_val)
         self.max_val = int(max_val)
         self.exp_val = float(exp_val)
+        self.buffer_manager = buffer_manager
         
         # 【超高清輸入源】：永遠維持 100% 乾淨無污染
         self.original_bgr = bgr
@@ -215,10 +220,29 @@ def quantize_gray_with_indices(
     morph_enabled: bool = False,
     morph_strength: int = 1,
     morph_threshold: int = 35,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-    """模組化影像濾鏡與量化入口點。"""
+    buffer_manager: Any = None,
+    palette: list[tuple[int, int, int]] | None = None,
+    edge_mix: int = 0,
+    edge_color: tuple[int, int, int] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray]:
+    """模組化影像濾鏡與量化入口點，回傳 (量化彩色影像, 索引矩陣, 邊緣矩陣, 真實比例計數)。"""
     levels = max(2, int(levels))
-    ctx = FilterContext(bgr, levels, min_value, max_value, exp_value)
+    ctx = FilterContext(bgr, levels, min_value, max_value, exp_value, buffer_manager=buffer_manager)
+    
+    # --- 關鍵：在濾鏡之前獲取「真實比例」 (採用抽樣優化) ---
+    lut = get_quantization_lut(ctx.levels, ctx.min_val, ctx.max_val, ctx.exp_val)
+    
+    # 對統計資料進行降採樣，解析度越高省下的時間越多
+    h_orig, w_orig = ctx.original_gray.shape
+    if w_orig > 400:
+        scale_stats = 400 / w_orig
+        h_stats = max(1, int(h_orig * scale_stats))
+        stats_gray = cv2.resize(ctx.original_gray, (400, h_stats), interpolation=cv2.INTER_NEAREST)
+    else:
+        stats_gray = ctx.original_gray
+        
+    true_indices = cv2.LUT(stats_gray, lut)
+    true_counts = np.bincount(true_indices.ravel(), minlength=levels)
     
     # 註冊可供調配的積木庫
     FILTERS = {
@@ -237,40 +261,54 @@ def quantize_gray_with_indices(
         "morph_threshold": morph_threshold,
     }
     
-    # 【積木隨意搬風】：依照 process_order 動態呼叫
-    import time
     for step in process_order:
         if step in FILTERS:
-            t0 = time.perf_counter()
             FILTERS[step].apply(ctx, **kwargs)
-            t1 = time.perf_counter()
-            print(f"  [Filter Step] {step}: {(t1-t0)*1000:.2f}ms", flush=True)
             
-    # 最終量化查表
-    lut = get_quantization_lut(ctx.levels, ctx.min_val, ctx.max_val, ctx.exp_val)
-    ctx.indices = cv2.LUT(ctx.working_gray, lut).astype(np.int32)
+    # 最終量化索引 (吃過濾鏡後的 working_gray)
+    ctx.indices = cv2.LUT(ctx.working_gray, lut).astype(np.uint8)
     
-    # --- 顯示輸出映射 (Display Mapping) 查表優化 ---
+    # --- 顯示輸出映射 (Display Mapping) ---
     d_min = display_min if display_min is not None else 0
     d_max = display_max if display_max is not None else 255
     d_exp = display_exp if display_exp is not None else 0
     
-    # 僅針對少數離散階調值進行浮點與 Gamma 運算
     lut_inputs = np.arange(levels, dtype=np.float32)
     norm_lut = lut_inputs / (levels - 1)
     if d_exp != 0:
         gamma_display = float(np.power(2.0, float(d_exp)))
         norm_lut = np.power(norm_lut, gamma_display)
     out_lut = (norm_lut * (d_max - d_min) + d_min).astype(np.uint8)
+
+    # --- 建立彩色 3-Channel LUT ---
+    # 我們在這裡一次搞定所有顏色映射與 Edge Mix
+    full_lut_bgr = np.zeros((1, 256, 3), dtype=np.uint8)
+    mix = (edge_mix / 100.0) if ctx.edges is not None else 0.0
     
-    # 填入適用於 cv2.LUT 的 256 長度映射表
-    full_display_lut = np.zeros(256, dtype=np.uint8)
-    full_display_lut[:levels] = out_lut
+    if palette and len(palette) == levels:
+        for i, color in enumerate(palette):
+            r, g, b = color
+            full_lut_bgr[0, i] = [
+                int(b * (1.0 - mix) + 255.0 * mix),
+                int(g * (1.0 - mix) + 255.0 * mix),
+                int(r * (1.0 - mix) + 255.0 * mix)
+            ]
+    else:
+        for i in range(levels):
+            val = out_lut[i]
+            mixed_val = int(val * (1.0 - mix) + 255.0 * mix)
+            full_lut_bgr[0, i] = [mixed_val, mixed_val, mixed_val]
+
+    # 直接進行彩色查表
+    out = cv2.LUT(ctx.indices, full_lut_bgr)
     
-    # 透過 OpenCV 的 C++ 底層引擎瞬間完成千萬像素查表
-    out = cv2.LUT(ctx.indices.astype(np.uint8), full_display_lut)
-    
+    # 處理邊緣顏色
+    if ctx.edges is not None and edge_color:
+        ec_bgr = edge_color[::-1] # RGB -> BGR
+        out[ctx.edges > 0] = ec_bgr
+
+    # 處理形態學遮罩
     if ctx.morph_mask is not None:
         out[ctx.morph_mask] = 0
         
-    return out, ctx.indices, ctx.edges
+    return out, ctx.indices, ctx.edges, true_counts

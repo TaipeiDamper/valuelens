@@ -69,10 +69,12 @@ class LiveScreenSource(IFrameSource):
             cap_w = max(1, int(round(w * dpr)))
             cap_h = max(1, int(round(h * dpr)))
             
-        frame = self.capture.capture_region(cap_x, cap_y, cap_w, cap_h, exclude_hwnd=ctx.hwnd)
+        frame = self.capture.capture_region(cap_x, cap_y, cap_w, cap_h)
         
         if frame is not None:
-            self.last_raw_frame = frame.copy()
+            # 確保記憶體連續，但避免全量拷貝
+            frame = np.ascontiguousarray(frame)
+            self.last_raw_frame = frame
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             return frame, gray
         return None, None

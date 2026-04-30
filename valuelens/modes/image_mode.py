@@ -130,24 +130,41 @@ class ImageModeDialog(QDialog):
         self.apply_btn.setEnabled(False)
         self.worker.process_frame(self._source.copy(), self.settings)
 
-    def _on_calc_finished(self, logic_quantized: np.ndarray, logic_indices: np.ndarray, edges: object, t_computed: float) -> None:
+    def _on_calc_finished(self, logic_quantized: np.ndarray, logic_indices: np.ndarray, edges: np.ndarray | None, true_counts: np.ndarray, t_computed: float) -> None:
         self.apply_btn.setText("套用目前參數")
         self.apply_btn.setEnabled(True)
         
-        if edges is not None:
-            mix = self.settings.edge_mix / 100.0
-            ec = self.settings.edge_color[::-1] # RGB -> BGR
-            base_bgr = cv2.cvtColor(logic_quantized, cv2.COLOR_GRAY2BGR)
-            if mix >= 1.0:
-                final_bgr = np.full_like(base_bgr, 255)
-                final_bgr[edges > 0] = ec
-            else:
-                bg_part = (base_bgr.astype(np.float32) * (1.0 - mix) + 255.0 * mix).astype(np.uint8)
-                final_bgr = bg_part
-                final_bgr[edges > 0] = ec
-            self._result = final_bgr
+        # --- [V2 加速渲染] ---
+        levels = max(2, int(self.settings.levels))
+        # 只有在開啟邊緣偵測時才套用背景淡化
+        mix = (self.settings.edge_mix / 100.0) if edges is not None else 0.0
+        lut_b = np.zeros((256, 1), dtype=np.uint8)
+        lut_g = np.zeros((256, 1), dtype=np.uint8)
+        lut_r = np.zeros((256, 1), dtype=np.uint8)
+        
+        palette = getattr(self.settings, 'custom_palette', [])
+        if palette and len(palette) == levels:
+            for i, color in enumerate(palette):
+                r, g, b = color
+                lut_b[i, 0] = int(b * (1.0 - mix) + 255.0 * mix)
+                lut_g[i, 0] = int(g * (1.0 - mix) + 255.0 * mix)
+                lut_r[i, 0] = int(r * (1.0 - mix) + 255.0 * mix)
         else:
-            self._result = cv2.cvtColor(logic_quantized, cv2.COLOR_GRAY2BGR)
+            for i in range(levels):
+                val = int(round((i / max(1, levels - 1)) * 255))
+                mixed_val = int(val * (1.0 - mix) + 255.0 * mix)
+                lut_b[i, 0] = lut_g[i, 0] = lut_r[i, 0] = mixed_val
+        
+        res_b = cv2.LUT(logic_indices, lut_b)
+        res_g = cv2.LUT(logic_indices, lut_g)
+        res_r = cv2.LUT(logic_indices, lut_r)
+        final_bgr = cv2.merge([res_b, res_g, res_r])
+        
+        if edges is not None:
+            ec = self.settings.edge_color[::-1]
+            final_bgr[edges > 0] = ec
+            
+        self._result = final_bgr
 
         self.preview.setPixmap(bgr_to_qpixmap(self._result).scaled(
             self.preview.size(),

@@ -18,8 +18,8 @@ from valuelens.core.capture_service import CaptureService
 from valuelens.core.hotkey_service import HotkeyService
 from valuelens.core.qt_image import bgr_to_qimage, gray_to_qimage, qimage_to_bgr
 from valuelens.core.quantize import native_distribution_from_indices, quantize_gray, quantize_gray_with_indices
-from valuelens.core.engine import ImageProcessWorker, AutoBalanceWorker
-from valuelens.core.scene_detector import GridSceneDetector
+from valuelens.core.engine import ImageProcessWorker, AutoBalanceWorker, CaptureWorker
+from valuelens.core.scene_detector import RandomSceneDetector
 from valuelens.core.sources import LiveScreenSource, StaticImageSource, FrameContext
 from valuelens.modes.image_mode import ImageModeDialog
 from valuelens.ui.control_panel import ControlPanel
@@ -61,20 +61,29 @@ class OverlayWindow(QMainWindow):
         
         self.store.state_changed.connect(self._on_state_changed)
         
-        self.calc_worker = ImageProcessWorker(self)
+        self.calc_worker = ImageProcessWorker()
         self.calc_worker.finished.connect(self._on_calc_finished)
         
         self.auto_balance_worker = AutoBalanceWorker(self)
         self.auto_balance_worker.finished.connect(self._on_auto_balance_finished)
+
+        self.cap_worker = CaptureWorker(self.frame_source, self.settings)
+        self.cap_worker.frame_ready.connect(self._on_capture_finished)
+        self.cap_worker.start()
         
-        # 初始化三層架構防線：
-        # 1. 稀疏網格 (Sparse: grid_count=2) 用於背景大幅更換檢測
-        self.scene_detector = GridSceneDetector(threshold=20.0, grid_count=2)
-        # 2. 稠密網格 (Dense: grid_count=6) 用於常規自動採樣 (比例 25)
-        self.dense_detector = GridSceneDetector(threshold=20.0, grid_count=6)
-        # 3. 極稠密網格 (Super Dense: grid_count=12) 用於低頻兜底校正 (比例 100)
-        self.super_dense_detector = GridSceneDetector(threshold=20.0, grid_count=12)
-        # 校準循環計數器
+        # 初始化三層架構防線 (改為隨機採樣)：
+        # 1. 稀疏採樣 (Sparse) 用於背景變動檢測
+        self.scene_detector = RandomSceneDetector(
+            threshold=self.settings.scene_threshold, 
+            sample_count=self.settings.sample_count
+        )
+        # 2. 稠密採樣 (Dense) 用於快速比例追蹤
+        self.dense_detector = RandomSceneDetector(
+            threshold=self.settings.scene_threshold, 
+            sample_count=max(1024, self.settings.sample_count * 4)
+        )
+        
+        self._last_full_sync_ts = time.monotonic()
         self._auto_eval_cycle = 0
         
         self.image_mode = ImageModeDialog(settings=self.settings, parent=self)
@@ -115,17 +124,18 @@ class OverlayWindow(QMainWindow):
         self._resize_start_global: QPoint | None = None
         self._frame = QPixmap()
         self._raw_frame = QPixmap()
-        self._panel_height = 200
+        self._panel_height = 175
         self._compare_gap = 6
         self._last_toggle_ts = 0.0
         self._is_dragging = False
+        self._last_dist_update_ts = 0.0  # 節流：控制比例計算頻率
         self._is_resizing = False
         self._is_refreshing = False
-        self._refresh_ms = 33             # 固定 30 FPS
+        self._refresh_ms = 16             # 提升至 60 FPS
         self._fps_count = 0                # FPS 計數
         self._fps_last_report = time.time() # 上次報告時間
-        self._last_frame_signature = None
         self._stable_frame_count = 0
+        self._force_refresh = True          # 新增：強制刷新標記，用於設定變更時
         self._compare_mode = bool(settings.compare_mode)
         self._processed_distribution_pct = [0.0] * max(2, int(settings.levels))
         self._raw_distribution_pct = [0.0] * max(2, int(settings.levels))
@@ -147,6 +157,11 @@ class OverlayWindow(QMainWindow):
         self._global_calc_dirty = False    # 標記全圖計算是否需要重新執行一次
         self._last_auto_balance_ts = 0.0
         self._last_raw_bgr_frame = None
+        self._calc_busy = False             # 標記運算執行緒是否忙碌
+        self._last_cap_time = 0.0           # 紀錄最近一次擷取耗時
+        self._last_calc_t_captured = 0.0    # 紀錄最近一次擷取完成的時間戳
+        self._last_calc_t_start = 0.0       # 紀錄最近一次運算開始的時間戳
+        self._last_refresh_ts = time.perf_counter() # 紀錄上一次完整的刷新時間戳
         self._mirror_window: MirrorWindow | None = None
 
         self._snap_timer = QTimer(self)
@@ -154,7 +169,7 @@ class OverlayWindow(QMainWindow):
         self._snap_timer.timeout.connect(self._on_snap_timeout)
 
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self._on_timer_tick)
+        self.timer.timeout.connect(self.refresh_frame)
         self.timer.start(self._refresh_ms)
 
         self._coalesce_timer = QTimer(self)
@@ -203,11 +218,11 @@ class OverlayWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         # 啟動時跑一次自動平衡
-        # --- 開機強行重置為空白面板 ---
-        self.panel._clear_all_settings()
         self.panel.sync_from_settings(self.settings)
         
         self.show()
+        # 即時模式啟動時預設隱身
+        self.capture.set_affinity(self.effectiveWinId(), True)
         self.request_refresh()
 
     def _trigger_startup_auto_balance(self) -> None:
@@ -307,7 +322,9 @@ class OverlayWindow(QMainWindow):
         cb.setPixmap(pix)
         print("[Debug] Full screen (including window) captured to clipboard.")
         
-        # 5. 下一輪 refresh 會自動根據 CaptureService 恢復隱身狀態
+        # 5. 恢復目前的模式隱身狀態
+        is_live = not self.frame_source.is_static
+        self.capture.set_affinity(hwnd, is_live)
 
     def on_save_startup_preset(self) -> None:
         """將目前的所有參數儲存為啟動預設。"""
@@ -338,6 +355,7 @@ class OverlayWindow(QMainWindow):
         """切換凍結模式：鎖定當前畫面或恢復即時擷取。同時處理 ImageMode 釋放。"""
         if self.frame_source.is_static:
             # 恢復即時模式
+            from ..core.sources import LiveScreenSource
             self.frame_source = LiveScreenSource(self.capture)
             self._static_source_type = ""
             self._full_image_gray = None
@@ -345,31 +363,34 @@ class OverlayWindow(QMainWindow):
             self.panel.freeze_btn.style().unpolish(self.panel.freeze_btn)
             self.panel.freeze_btn.style().polish(self.panel.freeze_btn)
             self.panel.freeze_btn.setToolTip("鎖定當下畫面 (就地凍結)")
+            
+            # 即時模式重新開啟隱身
+            self.capture.set_affinity(self.effectiveWinId(), True)
+            
             print("[StaticMode] EXIT (Back to Live)")
             self._layout_overlay_buttons()
         else:
-            # 擷取整個視窗背後的影像（包含工具列後面的區域）
+            # 擷取整個視窗背後的影像
             dpr = self.devicePixelRatioF()
             phys = self._physical_window_rect()
             if phys is not None:
                 win_x, win_y, win_pw, win_ph = phys
-                frame = self.capture.capture_region(
-                    win_x, win_y, win_pw, win_ph,
-                    exclude_hwnd=self._hwnd()
-                )
+                # 視窗目前已經是隱身狀態，直接擷取即可
+                frame = self.capture.capture_region(win_x, win_y, win_pw, win_ph)
             else:
                 frame = getattr(self.frame_source, 'last_raw_frame', None)
                 if frame is None:
                     rect = self._lens_rect()
-                    frame = self.capture.capture_region(
-                        rect.x(), rect.y(), rect.width(), rect.height(),
-                        exclude_hwnd=self._hwnd()
-                    )
+                    frame = self.capture.capture_region(rect.x(), rect.y(), rect.width(), rect.height())
                 
             if frame is not None:
+                from ..core.sources import StaticImageSource
                 self.frame_source = StaticImageSource(frame.copy(), "frozen")
                 self._static_source_type = "frozen"
                 self._full_image_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                
+                # 靜態模式解除隱身，方便使用者截圖
+                self.capture.set_affinity(self.effectiveWinId(), False)
                 
                 self.panel.freeze_btn.setProperty("freeze_mode", "frozen")
                 self.panel.freeze_btn.style().unpolish(self.panel.freeze_btn)
@@ -392,9 +413,12 @@ class OverlayWindow(QMainWindow):
     def import_image(self, bgr_image: np.ndarray) -> None:
         """匯入外部圖片，進入 StaticMode (Image 類型)。"""
         print(f"[DEBUG][User Action] 匯入靜態圖片, 大小={bgr_image.shape}")
+        from ..core.sources import StaticImageSource
         self.frame_source = StaticImageSource(bgr_image, "image")
         self._static_source_type = "image"
         self._full_image_gray = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY)
+        # 靜態模式解除隱身
+        self.capture.set_affinity(self.effectiveWinId(), False)
 
         self.panel.freeze_btn.setProperty("freeze_mode", "image")
         self.panel.freeze_btn.style().unpolish(self.panel.freeze_btn)
@@ -465,13 +489,14 @@ class OverlayWindow(QMainWindow):
         if "hotkey" in changed_keys:
             self.hotkeys.register("toggle", self.settings.hotkey, self.toggle_enabled)
 
-        self._last_frame_signature = None
+        self._force_refresh = True
         self.request_refresh(16)
 
     def on_settings_changed(
         self, levels: int, min_value: int, max_value: int, exp_value: float
     ) -> None:
         print(f"[DEBUG][User Action] 色階設定變更: 階層={levels}, 輸入下限={min_value}, 輸入上限={max_value}, 偏差={exp_value}")
+        self._force_refresh = True
         if self.settings.levels != levels:
             old_lvl = self.settings.levels
             new_lvl = levels
@@ -527,13 +552,12 @@ class OverlayWindow(QMainWindow):
 
     def on_collapse_toggled(self, collapsed: bool) -> None:
         print(f"[DEBUG][User Action] 面板收合狀態變更: 收合={collapsed}")
-        self._panel_height = 36 if collapsed else 200
+        self._panel_height = 36 if collapsed else 175
         self._layout_panel()
         
         # 面板收合會導致鏡片區域 (lens rect) 大小與物理座標改變
         # 我們必須清除快取，強制下一幀重新計算
-        self._last_frame_signature = None
-        
+        self._force_refresh = True
         self.request_refresh(10)
 
     def on_compare_mode_changed(self, enabled: bool) -> None:
@@ -574,11 +598,8 @@ class OverlayWindow(QMainWindow):
             
         # 自動模式下實施 3 層混合校正架構 (100 -> 25 -> 25 -> 25 -> 100)
         if self._auto_continuous_enabled:
-            self._auto_eval_cycle = (self._auto_eval_cycle + 1) % 4
-            if self._auto_eval_cycle == 0:
-                eval_data = self.super_dense_detector.extract_grid_pixels(source_gray)  # 極稠密網格兜底校正
-            else:
-                eval_data = self.dense_detector.extract_grid_pixels(source_gray)  # 稠密採樣
+            # 統一使用稠密隨機採樣 (1024點) 進行平衡計算，兼顧速度與準確率
+            eval_data = self.dense_detector.get_sampled_pixels(source_gray)
         else:
             eval_data = source_gray
             
@@ -763,7 +784,7 @@ class OverlayWindow(QMainWindow):
                 custom_palette=getattr(self.settings, 'custom_palette', [])
             )
 
-    def request_refresh(self, delay_ms: int = 33) -> None:
+    def request_refresh(self, delay_ms: int = 16) -> None:
         if not self._coalesce_timer.isActive():
             self._coalesce_timer.start(delay_ms)
 
@@ -805,56 +826,51 @@ class OverlayWindow(QMainWindow):
 
 
     def refresh_frame(self) -> None:
-        """核心影像處理管線。"""
-        if self._is_refreshing:
-            return
+        """更新擷取上下文，驅動背景擷取。"""
+        rect = self._lens_rect()
+        if rect.width() <= 0 or rect.height() <= 0: return
+        dpr = self.devicePixelRatioF()
         
+        ctx = FrameContext(
+            view_rect=(rect.x(), rect.y(), rect.width(), rect.height()),
+            dpr=dpr,
+            phys_rect=self._physical_window_rect(),
+            hwnd=self._hwnd(),
+            panel_height=self._panel_height
+        )
+        self.cap_worker.update_context(ctx)
+        
+        # 即使背景還沒抓到新圖，UI 也要保持 60 FPS 的重繪 (處理平移、縮放等效果)
+        self.canvas.update()
+
+    def _on_capture_finished(self, frame: np.ndarray, gray_frame: np.ndarray, t_captured_val: float, cap_time: float) -> None:
+        """當背景擷取完成時觸發。"""
         self._fps_count += 1
-        now = time.time()
-        if now - self._fps_last_report >= 1.0:
-            fps = self._fps_count / (now - self._fps_last_report)
+        now_ts = time.time()
+        if now_ts - self._fps_last_report >= 1.0:
+            fps = self._fps_count / (now_ts - self._fps_last_report)
             self.panel.set_fps(fps)
             self._fps_count = 0
-            self._fps_last_report = now
+            self._fps_last_report = now_ts
 
         self._stable_frame_count += 1
-        self._is_refreshing = True
         try:
             t_start = time.perf_counter()
-            t_captured = t_start
-            # 1. 座標與參數準備
-            rect = self._lens_rect()
-            if rect.width() <= 0 or rect.height() <= 0: return
             dpr = self.devicePixelRatioF()
             
-            # --- 核心邏輯：決定影像來源 ---
-            ctx = FrameContext(
-                view_rect=(rect.x(), rect.y(), rect.width(), rect.height()),
-                dpr=dpr,
-                phys_rect=self._physical_window_rect(),
-                hwnd=self._hwnd(),
-                panel_height=self._panel_height
-            )
-            frame, gray_frame = self.frame_source.get_frame(ctx)
-            t_captured = time.perf_counter()
-            
-            if frame is None or frame.size == 0 or gray_frame is None: 
-                self._is_refreshing = False
-                return
-
+            # 使用背景傳來的資料與時間戳
+            self._last_cap_time = cap_time
+            self._last_calc_t_captured = t_captured_val
             self._last_gray_frame = gray_frame
+            self._last_raw_bgr_frame = frame
 
-            # 特徵檢查
-            signature = self._frame_signature(frame)
-            if signature == self._last_frame_signature and not self._frame.isNull():
-                self._is_refreshing = False
-                return
-            self._last_frame_signature = signature
-
-            h, w = frame.shape[:2]
-
-            # --- Bypass 模式：跳過量化，直接顯示原始影像 ---
+            # 檢查超時校正 (維持心跳，確保全圖同步)
+            mon_now = time.monotonic()
+            is_timeout = (mon_now - self._last_full_sync_ts > self.settings.sync_timeout_s)
+            
+            # --- [Scan 層] 立即處理基本顯示 (Bypass 或 Compare 直通) ---
             if self._bypass_mode:
+                h, w = frame.shape[:2]
                 if self._compare_mode:
                     half_w = w // 2
                     left_bgr = np.ascontiguousarray(frame[:, :half_w])
@@ -867,29 +883,40 @@ class OverlayWindow(QMainWindow):
                 self._frame = QPixmap.fromImage(qimg)
                 self._processed_distribution_pct = [0.0] * max(2, int(self.settings.levels))
                 self._raw_distribution_pct = [0.0] * max(2, int(self.settings.levels))
-                self._update_canvas()
-                self._is_refreshing = False
-            else:
-                # 正常量化處理：丟進 QThread 背景計算
+                self.canvas.update()
+                return # Bypass 模式不需進入 Compute 層
+
+            # --- [決策層] 檢查是否需要啟動重度運算 (Compute 層) ---
+            should_calc = True # 強制全時運算，不受變動偵測阻擋
+            if not should_calc and not self._frame.isNull():
+                self.canvas.update() # 畫面沒變，僅刷新畫布顯示舊緩存
+                return
+
+            # --- [Compute 層] 異步啟動量化處理 ---
+            if not self._calc_busy:
+                self._calc_busy = True
+                self._last_full_sync_ts = mon_now
+                self._force_refresh = False
+                h, w = frame.shape[:2]
                 if self._compare_mode:
                     half_w = w // 2
-                    left_bgr = np.ascontiguousarray(frame[:, :half_w])
                     left_gray = np.ascontiguousarray(gray_frame[:, :half_w])
                     self.calc_worker.process_frame(left_gray, self.settings)
-                    self._last_calc_frame = left_bgr.copy()
+                    self._last_calc_frame = np.ascontiguousarray(frame[:, :half_w]).copy()
                 else:
                     self.calc_worker.process_frame(gray_frame, self.settings)
                     self._last_calc_frame = frame.copy()
                 
                 self._last_calc_dpr = dpr
                 self._last_calc_t_start = t_start
-                self._last_calc_t_captured = t_captured
+                self._last_calc_t_captured = t_captured_val
+            
+            self.canvas.update()
                 
         except Exception as e:
             print(f"[Error] refresh_frame crash: {e}")
-            self._is_refreshing = False
 
-    def _on_calc_finished(self, logic_quantized: np.ndarray, logic_indices: np.ndarray, edges: np.ndarray | None, t_computed: float) -> None:
+    def _on_calc_finished(self, logic_quantized: np.ndarray, logic_indices: np.ndarray, edges: np.ndarray | None, true_counts: np.ndarray, t_computed: float) -> None:
         try:
             ui_start_time = time.perf_counter()
             if not hasattr(self, '_last_calc_frame') or self._last_calc_frame is None:
@@ -903,40 +930,20 @@ class OverlayWindow(QMainWindow):
             # 釋放引用避免記憶體洩漏
             self._last_calc_frame = None
             
-            # 根據 custom_palette 生成 base_bgr
-            levels = max(2, int(self.settings.levels))
-            palette = getattr(self.settings, 'custom_palette', [])
+            # 接收背景已經處理好（包含色盤、Edge Mix、Edge Color）的最終影像
+            final_bgr = logic_quantized
             
-            if palette and len(palette) == levels:
-                palette_bgr = np.zeros((levels, 3), dtype=np.uint8)
-                for i, color in enumerate(palette):
-                    palette_bgr[i] = color[::-1] # RGB -> BGR
-                base_bgr = palette_bgr[logic_indices]
-            else:
-                base_bgr = cv2.cvtColor(logic_quantized, cv2.COLOR_GRAY2BGR)
-            
-            # 處理邊緣與比例 (Edge Mix)
-            if edges is not None:
-                mix = self.settings.edge_mix / 100.0
-                ec = self.settings.edge_color[::-1] # RGB -> BGR
-                
-                if mix >= 1.0:
-                    final_bgr = np.full_like(base_bgr, 255)
-                    final_bgr[edges > 0] = ec
-                else:
-                    bg_part = (base_bgr.astype(np.float32) * (1.0 - mix) + 255.0 * mix).astype(np.uint8)
-                    final_bgr = bg_part
-                    final_bgr[edges > 0] = ec
-                
-                self._frame_array = np.ascontiguousarray(cv2.cvtColor(final_bgr, cv2.COLOR_BGR2RGB))
-                qimg = bgr_to_qimage(final_bgr)
-            else:
-                self._frame_array = np.ascontiguousarray(cv2.cvtColor(base_bgr, cv2.COLOR_BGR2RGB))
-                qimg = bgr_to_qimage(base_bgr)
+            self._frame_array = np.ascontiguousarray(cv2.cvtColor(final_bgr, cv2.COLOR_BGR2RGB))
+            qimg = bgr_to_qimage(final_bgr)
             
             qimg.setDevicePixelRatio(dpr)
             self._frame = QPixmap.fromImage(qimg)
-            self._update_distributions(self._last_gray_frame, logic_indices)
+            # 更新分佈比例數據 (節流處理)
+            now = time.time()
+            if now - self._last_dist_update_ts >= 0.1:
+                # 使用從 Worker 傳回的「濾鏡前真實比例」
+                self._update_distributions_from_counts(true_counts)
+                self._last_dist_update_ts = now
             
             # 3. 處理對照圖
             if self._compare_mode:
@@ -964,10 +971,10 @@ class OverlayWindow(QMainWindow):
                 now_ts = time.monotonic()
                 if now_ts - self._last_profile_ts > 0.33:
                     self._last_profile_ts = now_ts
-                    c_cap = (t_captured - t_start) * 1000
+                    c_cap = getattr(self, '_last_cap_time', 0.0)
                     c_comp = t_computed * 1000
                     c_ui = (ui_end_time - ui_start_time) * 1000
-                    c_total = (ui_end_time - t_start) * 1000
+                    c_total = c_cap + c_comp + c_ui
                     
                     s = self.settings
                     lvl = s.levels
@@ -1011,22 +1018,34 @@ class OverlayWindow(QMainWindow):
                             if current_target:
                                 self.on_auto_balance_target_requested(current_target)
         finally:
-            self._is_refreshing = False
+            self._calc_busy = False
+            self.canvas.update()
             
-            # 如果錄製視窗開啟中，則將完整的視窗內容「照翻」過去
-            if self._mirror_window and self._mirror_window.isVisible():
-                pix = self.grab()
-                self._mirror_window.update_frame(pix)
+            # 如果錄製視窗開啟中，則將渲染好的內容直接傳過去，避免沉重的 self.grab()
+            if self._mirror_window and self._mirror_window.isVisible() and not self._frame.isNull():
+                self._mirror_window.update_frame(self._frame)
 
-    @staticmethod
-    def _frame_signature(frame: np.ndarray) -> bytes:
-        if frame.size == 0:
-            return b""
-        sampled = frame[::8, ::8]
-        return sampled.tobytes()
+    def resizeEvent(self, event) -> None:
+        """處理視窗縮放事件，清空快取緩衝區以適應新尺寸。"""
+        super().resizeEvent(event)
+        if hasattr(self, 'engine_worker'):
+            self.engine_worker.buffer_manager.clear()
+        self.request_refresh(10)
 
     # paintEvent 與 _draw_manual_button 已經搬移至 RenderWidget (valuelens/ui/render_widget.py)
 
+
+    def _update_distributions_from_counts(self, true_counts: np.ndarray) -> None:
+        """
+        直接使用 Worker 預先計算好的 True Counts 更新 UI 比例顯示。
+        """
+        total = np.sum(true_counts)
+        if total > 0:
+            pcts = (true_counts / total * 100.0).tolist()
+            # 由於我們需要顯示的順序與 UI 一致（通常是從亮到暗或反之），這裡直接填入
+            self._processed_distribution_pct = pcts
+            # 同步更新 Raw 分佈（在 V2 架構中，兩者在濾鏡前是相同的）
+            self._raw_distribution_pct = pcts
 
     def _update_distributions(
         self, raw_gray: np.ndarray | None, processed_indices: np.ndarray | None
@@ -1034,16 +1053,14 @@ class OverlayWindow(QMainWindow):
         from valuelens.core.balance import calc_level_distribution, calc_indices_distribution
         level_count = max(2, int(self.settings.levels))
         
-        # 自動模式下白灰黑比例統計採用代表性更高的「稠密網格」抽樣
-        if self._auto_continuous_enabled and raw_gray is not None:
-            eval_data = self.dense_detector.extract_grid_pixels(raw_gray)
-            self._raw_distribution_pct = calc_level_distribution(eval_data, level_count)
-        else:
+        # 備援邏輯：手動重新計算
+        if raw_gray is not None:
             self._raw_distribution_pct = calc_level_distribution(raw_gray, level_count)
             
-        self._processed_distribution_pct = calc_indices_distribution(
-            processed_indices, level_count
-        )
+        if processed_indices is not None:
+            self._processed_distribution_pct = calc_indices_distribution(
+                processed_indices, level_count
+            )
 
     # _draw_distribution_overlay 已經搬移至 RenderWidget (valuelens/ui/render_widget.py)
 
@@ -1092,7 +1109,7 @@ class OverlayWindow(QMainWindow):
             self.showMaximized()
             self.panel.max_btn.setText("❐")
         self._last_frame_signature = None
-        self.request_refresh(50)
+        self.request_refresh(16)
 
     def _on_snap_timeout(self) -> None:
         """當拖曳至邊緣超過時限，觸發全螢幕。"""
@@ -1303,7 +1320,7 @@ class OverlayWindow(QMainWindow):
             if self._resize_edges & _EDGE_BOTTOM:
                 g.setBottom(max(g.top() + _MIN_HEIGHT - 1, g.bottom() + delta.y()))
             self.setGeometry(g)
-            self.request_refresh(0)
+            self.request_refresh(16)
             return
 
         # ImageMode 平移圖片 (僅限左鍵)
@@ -1369,8 +1386,10 @@ class OverlayWindow(QMainWindow):
         self.request_refresh(5)
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        # 儲存視窗狀態
-        geom = self.geometry()
+        """關閉視窗時確保所有背景執行緒都已停止。"""
+        self.timer.stop()
+        self.cap_worker.stop()
+        self.calc_worker.stop()
         from dataclasses import asdict
         current_dict = asdict(self.settings)
         
@@ -1409,16 +1428,18 @@ class OverlayWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        if hasattr(self, 'calc_worker'):
+            self.calc_worker.buffer_manager.clear()
         if hasattr(self, 'canvas'):
             self.canvas.setGeometry(self.rect())
         self._layout_panel()
         self._layout_overlay_buttons()
-        self.request_refresh(20)
+        self.request_refresh(self.settings.refresh_ms)
 
     def moveEvent(self, event) -> None:  # type: ignore[override]
         super().moveEvent(event)
         self._last_frame_signature = None
-        self.request_refresh(20)
+        self.request_refresh(16)
 
     def wheelEvent(self, event) -> None:  # type: ignore[override]
         if not self.frame_source.is_static:

@@ -17,13 +17,17 @@ class CaptureService:
         self._sct = mss.mss()
         self._user32 = ctypes.windll.user32 if sys.platform.startswith("win") else None
 
+    def bind_to_current_thread(self) -> None:
+        """mss 在 Windows 上是 Thread-local 的，若由背景執行緒接管，必須呼叫此方法重新綁定。"""
+        # 不要呼叫 self._sct.close()，否則會因為跨執行緒存取 thread-local variables 報錯
+        self._sct = mss.mss()
+
     def capture_region(
         self,
         x: int,
         y: int,
         width: int,
         height: int,
-        exclude_hwnd: Optional[int] = None,
     ) -> np.ndarray:
         monitor = {
             "left": int(x),
@@ -32,15 +36,15 @@ class CaptureService:
             "height": max(1, int(height)),
         }
 
-        excluded = self._apply_affinity(exclude_hwnd, _WDA_EXCLUDEFROMCAPTURE)
-        try:
-            shot = self._sct.grab(monitor)
-        finally:
-            if excluded:
-                self._apply_affinity(exclude_hwnd, _WDA_NONE)
-
-        img = np.array(shot, dtype=np.uint8)
+        shot = self._sct.grab(monitor)
+        # 使用更快的 frombuffer 方式，避免 np.array 的二次拷貝
+        img = np.frombuffer(shot.bgra, dtype=np.uint8).reshape((shot.height, shot.width, 4))
         return img[:, :, :3]
+
+    def set_affinity(self, hwnd: int | None, enabled: bool) -> bool:
+        """設定視窗隱身屬性。enabled=True 則擷取時不可見。"""
+        affinity = _WDA_EXCLUDEFROMCAPTURE if enabled else _WDA_NONE
+        return self._apply_affinity(hwnd, affinity)
 
     def _apply_affinity(self, hwnd: Optional[int], affinity: int) -> bool:
         if not self._user32 or hwnd is None:

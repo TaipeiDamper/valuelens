@@ -423,7 +423,7 @@ class ControlPanel(QWidget):
         row2.addWidget(self.toggle_output_btn)
         row2.addWidget(self.range_slider, 1)
         self.logic_exp_label = QLabel("偏差")
-        self.logic_exp_label.setFixedWidth(100)
+        self.logic_exp_label.setFixedWidth(115)
         row2.addWidget(self.logic_exp_label)
         row2.addWidget(self.exp_slider)
 
@@ -446,7 +446,7 @@ class ControlPanel(QWidget):
         bottom_row.addWidget(QLabel("📤 輸出"))
         bottom_row.addWidget(self.display_range_slider, 1)
         self.display_exp_label = QLabel("偏差")
-        self.display_exp_label.setFixedWidth(100)
+        self.display_exp_label.setFixedWidth(115)
         bottom_row.addWidget(self.display_exp_label)
         bottom_row.addWidget(self.display_exp_slider)
         self.output_row_widget.setVisible(False) # 預設收合
@@ -477,7 +477,7 @@ class ControlPanel(QWidget):
         extra_layout.addLayout(btn_row)
 
         layout = QVBoxLayout(self)
-        self.setFixedHeight(165)
+        self.setFixedHeight(175)
         self.setMinimumWidth(500) # 防止視窗縮太小導致 UI 完全崩潰
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -552,9 +552,9 @@ class ControlPanel(QWidget):
         self.output_row_widget.setVisible(is_visible)
         # 動態調整面板尺寸以節省縱向空間
         if is_visible:
-            self.setFixedHeight(195)
+            self.setFixedHeight(210)
         else:
-            self.setFixedHeight(165)
+            self.setFixedHeight(175)
 
     def _on_collapse_toggled(self, checked: bool) -> None:
         if checked:
@@ -563,7 +563,7 @@ class ControlPanel(QWidget):
             self.collapse_btn.setText("▼")
         else:
             self.extra_container.show()
-            self.setFixedHeight(165)
+            self.setFixedHeight(175)
             self.collapse_btn.setText("▲")
         self.collapse_toggled.emit(checked)
 

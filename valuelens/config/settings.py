@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import numpy as np
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -30,17 +31,29 @@ class AppSettings:
     morph_enabled: bool = False
     morph_strength: int = 1
     morph_threshold: int = 35
-    refresh_ms: int = 100
+    refresh_ms: int = 16
+    scene_threshold: float = 10.0
+    sync_timeout_s: float = 1.0
+    sample_count: int = 256
     x: int = 200
     y: int = 200
     width: int = 640
     height: int = 360
     startup_preset: dict | None = None
-    presets: list[dict | None] = field(default_factory=lambda: [None] * 20)
+    presets: list[dict | None] = field(default_factory=lambda: [None] * 40)
     process_order: list[str] = ("blur", "dither", "edge", "morph")
     custom_palette: list[tuple[int, int, int]] = field(default_factory=list)
     last_state: dict | None = None
     last_color_state: dict | None = None
+
+
+class SettingsEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (np.integer, np.floating)):
+            return obj.item()
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 
 
 class SettingsManager:
@@ -55,6 +68,11 @@ class SettingsManager:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return AppSettings()
+
+        # Ensure presets list is at least 40 entries long
+        if "presets" in raw and isinstance(raw["presets"], list):
+            if len(raw["presets"]) < 40:
+                raw["presets"].extend([None] * (40 - len(raw["presets"])))
 
         defaults = asdict(AppSettings())
         # Migration Revert
@@ -73,7 +91,5 @@ class SettingsManager:
     def save(self, settings: AppSettings) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(
-            json.dumps(asdict(settings), ensure_ascii=False, indent=2), encoding="utf-8"
+            json.dumps(asdict(settings), ensure_ascii=False, indent=2, cls=SettingsEncoder), encoding="utf-8"
         )
-
-
