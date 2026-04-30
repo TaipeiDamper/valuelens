@@ -42,7 +42,7 @@ def test_project_assets():
             window.auto_balance_worker.stop()
         if hasattr(window, "cap_worker"):
             window.cap_worker.stop()
-        window.close()
+        window.hide()
         window.deleteLater()
         app.processEvents()
         return True

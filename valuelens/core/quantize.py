@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import time
+from typing import Any
+
 import cv2
 import numpy as np
 
@@ -244,13 +247,29 @@ def quantize_gray_with_indices(
     palette: list[tuple[int, int, int]] | None = None,
     edge_mix: int = 0,
     edge_color: tuple[int, int, int] | None = None,
+    profile: dict[str, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray]:
     """模組化影像濾鏡與量化入口點，回傳 (量化彩色影像, 索引矩陣, 邊緣矩陣, 真實比例計數)。"""
+    if profile is not None:
+        profile.clear()
+    t_total = time.perf_counter() if profile is not None else 0.0
+    t_last = t_total
+
+    def _mark(name: str) -> None:
+        nonlocal t_last
+        if profile is None:
+            return
+        now = time.perf_counter()
+        profile[name] = (now - t_last) * 1000.0
+        t_last = now
+
     levels = max(2, int(levels))
     ctx = FilterContext(bgr, levels, min_value, max_value, exp_value, curve_mode, buffer_manager=buffer_manager)
+    _mark("prepare_gray_ms")
     
     # --- 關鍵：在濾鏡之前獲取「真實比例」 (採用抽樣優化) ---
     lut = get_quantization_lut(ctx.levels, ctx.min_val, ctx.max_val, ctx.exp_val, ctx.curve_mode)
+    _mark("logic_lut_ms")
     
     # 對統計資料進行降採樣，解析度越高省下的時間越多
     h_orig, w_orig = ctx.original_gray.shape
@@ -263,6 +282,7 @@ def quantize_gray_with_indices(
         
     true_indices = cv2.LUT(stats_gray, lut)
     true_counts = np.bincount(true_indices.ravel(), minlength=levels)
+    _mark("stats_ms")
     
     kwargs = {
         "blur_radius": blur_radius,
@@ -276,9 +296,11 @@ def quantize_gray_with_indices(
     for step in process_order:
         if step in FILTERS:
             FILTERS[step].apply(ctx, **kwargs)
+    _mark("filters_ms")
             
     # 最終量化索引 (吃過濾鏡後的 working_gray)
     ctx.indices = cv2.LUT(ctx.working_gray, lut).astype(np.uint8)
+    _mark("final_index_ms")
     
     # --- 顯示輸出映射 (Display Mapping) ---
     d_min = display_min if display_min is not None else 0
@@ -291,6 +313,7 @@ def quantize_gray_with_indices(
         gamma_display = float(np.power(2.0, float(d_exp)))
         norm_lut = np.power(norm_lut, gamma_display)
     out_lut = (norm_lut * (d_max - d_min) + d_min).astype(np.uint8)
+    _mark("display_lut_ms")
 
     # --- 建立彩色 3-Channel LUT ---
     # 我們在這裡一次搞定所有顏色映射與 Edge Mix
@@ -313,6 +336,7 @@ def quantize_gray_with_indices(
 
     # 直接進行彩色查表 (NumPy 方式)
     out_bgr = full_lut_bgr[ctx.indices]
+    _mark("color_map_ms")
     
     # 處理邊緣顏色
     if ctx.edges is not None and edge_color:
@@ -322,8 +346,12 @@ def quantize_gray_with_indices(
     # 處理形態學遮罩
     if ctx.morph_mask is not None:
         out_bgr[ctx.morph_mask] = 0
+    _mark("edge_morph_apply_ms")
         
     # 在背景執行緒完成 RGB 轉換，徹底解放主執行緒
     out_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+    _mark("rgb_convert_ms")
+    if profile is not None:
+        profile["total_ms"] = (time.perf_counter() - t_total) * 1000.0
     
     return out_rgb, ctx.indices, ctx.edges, true_counts

@@ -29,7 +29,7 @@ def run_stress_test():
         common_levels = [2, 3, 5, 8]
         
         test_actions = [
-            ("Levels Change", lambda: window.on_settings_changed(np.random.choice(common_levels), 0, 255, 0)),
+            ("Levels Change", lambda: window.on_settings_changed(np.random.choice(common_levels), 0, 255, 0, window.settings.curve_mode)),
             ("Edge Toggle", lambda: window.on_edge_settings_changed(True, 50, 100)),
             ("Morph Toggle", lambda: window.on_morph_settings_changed(True, 1, 35)),
             ("Dither Toggle", lambda: window.on_effect_settings_changed(True, 10, True, 30)),
@@ -52,8 +52,15 @@ def run_stress_test():
         
         print("[Ultimate-Check] PASS: System survived the full button simulation.")
         
-        window.calc_worker.stop()
-        window.auto_balance_worker.stop()
+        if hasattr(window, "calc_worker"):
+            window.calc_worker.stop()
+        if hasattr(window, "auto_balance_worker"):
+            window.auto_balance_worker.stop()
+        if hasattr(window, "cap_worker"):
+            window.cap_worker.stop()
+        window.hide()
+        window.deleteLater()
+        app.processEvents()
         return True
         
     except Exception as e:

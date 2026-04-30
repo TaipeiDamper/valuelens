@@ -34,7 +34,7 @@ class AutoBalanceWorker(QThread):
         self.cond.wakeOne()
         self.mutex.unlock()
         self.quit()
-        self.wait(200)
+        self.wait(3000)
 
     def run(self) -> None:
         while True:
@@ -108,7 +108,7 @@ class ImageProcessWorker(QThread):
         self.cond.wakeOne()
         self.mutex.unlock()
         self.quit()
-        self.wait(200)
+        self.wait(3000)
 
     def run(self) -> None:
         while True:
@@ -184,7 +184,7 @@ class CaptureWorker(QThread):
 
     def stop(self):
         self._is_running = False
-        self.wait(200)
+        self.wait(1000)
 
     def update_threshold(self, threshold: float):
         """同步更新背景偵測器的門檻。"""

@@ -49,3 +49,24 @@ def test_manual_lut_is_monotonic() -> None:
     lut = get_quantization_lut(levels=8, min_val=10, max_val=240, exp_val=0.2, curve_mode=0)
     assert lut.shape == (256,)
     assert np.all(np.diff(lut.astype(np.int32)) >= 0)
+
+
+def test_profile_collection_does_not_change_output() -> None:
+    frame = _sample_frame(seed=11)
+    baseline = quantize_gray_with_indices(frame, levels=5, min_value=8, max_value=240, exp_value=0.1)
+
+    profile: dict[str, float] = {}
+    profiled = quantize_gray_with_indices(
+        frame,
+        levels=5,
+        min_value=8,
+        max_value=240,
+        exp_value=0.1,
+        profile=profile,
+    )
+
+    assert np.array_equal(baseline[0], profiled[0])
+    assert np.array_equal(baseline[1], profiled[1])
+    assert np.array_equal(baseline[3], profiled[3])
+    assert profile["total_ms"] >= 0.0
+    assert "filters_ms" in profile

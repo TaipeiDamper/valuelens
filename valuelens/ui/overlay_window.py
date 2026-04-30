@@ -488,6 +488,7 @@ class OverlayWindow(QMainWindow):
     def on_settings_changed(
         self, levels: int, min_value: int, max_value: int, exp_value: float, curve_mode: int
     ) -> None:
+        old_lvl = self.settings.levels
         self.settings.levels = levels
         self.settings.min_value = min_value
         self.settings.max_value = max_value
@@ -499,8 +500,7 @@ class OverlayWindow(QMainWindow):
             
         print(f"[DEBUG][User Action] 色階設定變更: 階層={levels}, 輸入下限={min_value}, 輸入上限={max_value}, 偏差={exp_value}")
         self._force_refresh = True
-        if self.settings.levels != levels:
-            old_lvl = self.settings.levels
+        if old_lvl != levels:
             new_lvl = levels
             
             was_multi = old_lvl in (3, 5, 8)
@@ -531,7 +531,7 @@ class OverlayWindow(QMainWindow):
                 # 其他情況（例如第一次進入），執行全域最佳
                 self._auto_balance_use_current = False
             
-        self.store.update(levels=levels, min_value=min_value, max_value=max_value, exp_value=exp_value)
+        self.store.update(levels=levels, min_value=min_value, max_value=max_value, exp_value=exp_value, curve_mode=curve_mode)
 
     def on_display_settings_changed(self, min_value: int, max_value: int, exp_value: float) -> None:
         print(f"[DEBUG][User Action] 輸出顯示設定變更: 輸出下限={min_value}, 輸出上限={max_value}, 偏差={exp_value}")
@@ -1217,7 +1217,13 @@ class OverlayWindow(QMainWindow):
             
         self.panel.sync_from_settings(self.settings)
         # 觸發 UI 同步
-        self.on_settings_changed(self.settings.levels, self.settings.min_value, self.settings.max_value, self.settings.exp_value)
+        self.on_settings_changed(
+            self.settings.levels,
+            self.settings.min_value,
+            self.settings.max_value,
+            self.settings.exp_value,
+            self.settings.curve_mode,
+        )
         self.on_display_settings_changed(self.settings.display_min_value, self.settings.display_max_value, self.settings.display_exp_value)
         self.on_effect_settings_changed(self.settings.blur_enabled, self.settings.blur_radius, self.settings.dither_enabled, self.settings.dither_strength)
         self.on_edge_settings_changed(self.settings.edge_enabled, self.settings.edge_strength, self.settings.edge_mix)
