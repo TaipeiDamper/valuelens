@@ -488,6 +488,10 @@ class OverlayWindow(QMainWindow):
     def on_settings_changed(
         self, levels: int, min_value: int, max_value: int, exp_value: float
     ) -> None:
+        # 同步更新背景偵測器的門檻
+        if hasattr(self, 'cap_worker'):
+            self.cap_worker.update_threshold(self.settings.scene_threshold)
+            
         print(f"[DEBUG][User Action] 色階設定變更: 階層={levels}, 輸入下限={min_value}, 輸入上限={max_value}, 偏差={exp_value}")
         self._force_refresh = True
         if self.settings.levels != levels:
@@ -589,24 +593,40 @@ class OverlayWindow(QMainWindow):
         if source_gray is None or source_gray.size == 0:
             return
             
-        # 自動模式下實施 3 層混合校正架構 (100 -> 25 -> 25 -> 25 -> 100)
+        # 根據模式決定樣本與起點
         if self._auto_continuous_enabled:
-            # 統一使用稠密隨機採樣 (1024點) 進行平衡計算，兼顧速度與準確率
-            eval_data = self.scene_detector.get_sampled_pixels(source_gray)
+            # 「持續模式」：使用縮圖加速，並從當前參數開始優化以保持平滑
+            h_orig, w_orig = source_gray.shape
+            target_w = 400
+            if w_orig > target_w:
+                scale = target_w / w_orig
+                target_h = max(1, int(h_orig * scale))
+                eval_data = cv2.resize(source_gray, (target_w, target_h), interpolation=cv2.INTER_AREA)
+            else:
+                eval_data = source_gray
+                
+            start_min = self.settings.min_value
+            start_max = self.settings.max_value
+            start_exp = self.settings.exp_value
+            hysteresis_val = 0.005 
         else:
+            # 「重設平衡」按鈕：使用全圖，並重置搜尋起點以確保結果唯一且精準
+            print(f"[DEBUG] 重設平衡 (Reset Balance): 使用全圖解析度 {source_gray.shape}，重置搜尋起點")
             eval_data = source_gray
+            start_min = 0
+            start_max = 255
+            start_exp = 0.0
+            hysteresis_val = 0.0
             
         if eval_data.size == 0:
             return
 
-        hysteresis_val = 0.005 if self._auto_continuous_enabled else 0.0
-        
         self.auto_balance_worker.request_balance(
             eval_data,
             ratios,
-            self.settings.min_value,
-            self.settings.max_value,
-            self.settings.exp_value,
+            start_min,
+            start_max,
+            start_exp,
             self.settings.levels,
             hysteresis_val
         )
@@ -880,16 +900,12 @@ class OverlayWindow(QMainWindow):
                 return # Bypass 模式不需進入 Compute 層
 
             # --- [決策層] 檢查是否需要啟動重度運算 (Compute 層) ---
-            # 只有在以下情況下才執行運算：
-            # 1. 強制刷新 (_force_refresh)
-            # 2. 超時校正 (is_timeout)
-            # 3. 偵測到場景變動 (scene_detector.detect_change)
-            # 4. 目前沒有舊畫面快取
-            is_changed, mse_val = self.scene_detector.detect_change(gray_frame)
-            should_calc = self._force_refresh or is_timeout or is_changed or self._frame.isNull()
+            # 背景 CaptureWorker 已經確認過有變動或超時，這裡我們直接啟動運算
+            # 除非 calc_busy 或是有其他特殊排除條件
+            should_calc = True 
             
             if not should_calc:
-                self.canvas.update() # 畫面沒變，僅刷新畫布顯示舊緩存
+                self.canvas.update()
                 return
 
             # --- [Compute 層] 異步啟動量化處理 ---
@@ -1011,12 +1027,10 @@ class OverlayWindow(QMainWindow):
                     now = time.monotonic()
                     if now - self._last_auto_balance_ts > 0.15:
                         self._last_auto_balance_ts = now
-                        
-                        # 僅在畫面井字網格的變化量大於 threshold 時，才請求更新黑白灰參數
-                        if self._last_gray_frame is not None and self.scene_detector.detect_change(self._last_gray_frame):
-                            current_target = self.panel.balance_presets.currentData()
-                            if current_target:
-                                self.on_auto_balance_target_requested(current_target)
+                        # 走到這裡代表背景已確認過變動，直接觸發自動平衡
+                        current_target = self.panel.balance_presets.currentData()
+                        if current_target:
+                            self.on_auto_balance_target_requested(current_target)
         finally:
             self._calc_busy = False
             self.canvas.update()

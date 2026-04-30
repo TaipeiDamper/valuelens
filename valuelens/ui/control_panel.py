@@ -274,8 +274,8 @@ class ControlPanel(QWidget):
         self.record_btn.toggled.connect(self.recording_window_toggled.emit)
 
         self.balance_raw_btn = QToolButton()
-        self.balance_raw_btn.setText("⚖️")
-        self.balance_raw_btn.setToolTip("自動平衡：根據目前畫面分佈重新計算預設比例")
+        self.balance_raw_btn.setText("重設平衡")
+        self.balance_raw_btn.setToolTip("根據目前全圖畫面，自動計算最適合的黑白灰範圍 (快速鍵: R)")
 
         self.auto_continuous_check = QCheckBox("Auto")
         self.auto_continuous_check.setToolTip("開啟後會不斷自動調整參數，鎖定目前選擇的比例")

@@ -170,6 +170,11 @@ class CaptureWorker(QThread):
         self._is_running = True
         self._ctx = None
         self.mutex = QMutex()
+        
+        # 背景專用偵測器
+        from valuelens.core.scene_detector import RandomSceneDetector
+        self.detector = RandomSceneDetector(threshold=settings.scene_threshold)
+        self._last_full_sync_ts = 0.0
 
     def update_context(self, ctx):
         self.mutex.lock()
@@ -179,6 +184,13 @@ class CaptureWorker(QThread):
     def stop(self):
         self._is_running = False
         self.wait(200)
+
+    def update_threshold(self, threshold: float):
+        """同步更新背景偵測器的門檻。"""
+        self.mutex.lock()
+        if hasattr(self, 'detector'):
+            self.detector.threshold = threshold
+        self.mutex.unlock()
 
     def run(self):
         # 讓底層 CaptureService 在這個新的執行緒中建立專屬的 mss 資源
@@ -194,8 +206,18 @@ class CaptureWorker(QThread):
                 t0 = time.perf_counter()
                 frame, gray = self.frame_source.get_frame(ctx)
                 cap_time = (time.perf_counter() - t0) * 1000
-                if frame is not None:
-                    self.frame_ready.emit(frame, gray, t0, cap_time)
+                
+                if frame is not None and gray is not None:
+                    # 在背景直接判斷是否需要更新
+                    is_changed, _ = self.detector.detect_change(gray)
+                    
+                    # 檢查是否需要強制同步 (心跳)
+                    mon_now = time.monotonic()
+                    is_timeout = (mon_now - self._last_full_sync_ts > self.settings.sync_timeout_s)
+                    
+                    if is_changed or is_timeout:
+                        self._last_full_sync_ts = mon_now
+                        self.frame_ready.emit(frame, gray, t0, cap_time)
             
             # 控制最高擷取頻率，避免過度消耗 CPU
             time.sleep(max(0.001, self.settings.refresh_ms / 1000.0))
