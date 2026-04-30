@@ -69,11 +69,9 @@ class LiveScreenSource(IFrameSource):
             cap_w = max(1, int(round(w * dpr)))
             cap_h = max(1, int(round(h * dpr)))
             
-        bgra = self.capture.capture_region_bgra(cap_x, cap_y, cap_w, cap_h)
-        if bgra is not None:
-            # Keep grayscale path direct from BGRA to avoid extra intermediate conversion.
-            gray = cv2.cvtColor(bgra, cv2.COLOR_BGRA2GRAY)
-            frame = np.ascontiguousarray(bgra[:, :, :3])
+        frame = self.capture.capture_region(cap_x, cap_y, cap_w, cap_h)
+        if frame is not None:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             self.last_raw_frame = frame
             return frame, gray
         return None, None

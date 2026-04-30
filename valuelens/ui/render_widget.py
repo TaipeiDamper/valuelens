@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import Qt, QRect, QPoint
 from PySide6.QtGui import QPainter, QColor, QPixmap
 from PySide6.QtWidgets import QWidget
@@ -25,6 +27,8 @@ class RenderWidget(QWidget):
         self.compare_bw = False
         self.rect_global_calc = QRect()
         self.use_global_calc = False
+        self.last_paint_ms = 0.0
+        self.paint_count = 0
 
     def update_data(self, **kwargs) -> None:
         """更新渲染所需資料並觸發重繪"""
@@ -34,6 +38,7 @@ class RenderWidget(QWidget):
         self.update()
         
     def paintEvent(self, event) -> None:
+        t0 = time.perf_counter()
         painter = QPainter(self)
         
         painter.setClipRect(self.rect())
@@ -73,6 +78,8 @@ class RenderWidget(QWidget):
             self._draw_manual_button(painter, self.rect_compare_bw, "黑白", self.compare_bw)
         if not self.rect_global_calc.isNull():
             self._draw_manual_button(painter, self.rect_global_calc, "計算全圖", self.use_global_calc)
+        self.last_paint_ms = (time.perf_counter() - t0) * 1000.0
+        self.paint_count += 1
 
     def _draw_manual_button(self, painter: QPainter, rect: QRect, text: str, checked: bool) -> None:
         bg_color = QColor(46, 123, 246) if checked else QColor(0, 0, 0, 150)

@@ -6,6 +6,7 @@ import cv2
 import pytest
 
 from valuelens.core.quantize import (
+    apply_ordered_dither,
     get_color_lut_bgr,
     get_quantization_lut,
     native_color_map_rgb,
@@ -118,3 +119,29 @@ def test_native_color_map_matches_python_when_available() -> None:
 
     python_rgb = cv2.cvtColor(lut_bgr[indices], cv2.COLOR_BGR2RGB)
     assert np.array_equal(native_rgb, python_rgb)
+
+
+def test_dither_strength_scales_ordered_dither() -> None:
+    gray = np.full((16, 16), 128, dtype=np.uint8)
+    off = apply_ordered_dither(gray, 0)
+    half = apply_ordered_dither(gray, 50)
+    full = apply_ordered_dither(gray, 100)
+
+    assert np.array_equal(off, gray)
+    assert not np.array_equal(half, gray)
+    assert not np.array_equal(full, half)
+
+    half_delta = np.mean(np.abs(half.astype(np.int16) - gray.astype(np.int16)))
+    full_delta = np.mean(np.abs(full.astype(np.int16) - gray.astype(np.int16)))
+    assert full_delta > half_delta > 0
+
+
+def test_filter_parameter_values_are_wired() -> None:
+    frame = _sample_frame(seed=21, shape=(96, 128))
+    weak_dither = quantize_gray_with_indices(frame, levels=5, min_value=8, max_value=240, dither_strength=10)
+    strong_dither = quantize_gray_with_indices(frame, levels=5, min_value=8, max_value=240, dither_strength=100)
+    assert not np.array_equal(weak_dither[1], strong_dither[1])
+
+    no_edge_mix = quantize_gray_with_indices(frame, levels=5, edge_strength=60, edge_mix=0)
+    full_edge_mix = quantize_gray_with_indices(frame, levels=5, edge_strength=60, edge_mix=100)
+    assert not np.array_equal(no_edge_mix[0], full_edge_mix[0])

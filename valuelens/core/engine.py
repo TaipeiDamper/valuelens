@@ -195,41 +195,45 @@ class CaptureWorker(QThread):
         self.mutex.unlock()
 
     def run(self):
-        # 讓底層 CaptureService 在這個新的執行緒中建立專屬的 mss 資源
+        # 讓底層 CaptureService 在這個新的執行緒中建立專屬的 native capture 資源
         if hasattr(self.frame_source, "capture") and hasattr(self.frame_source.capture, "bind_to_current_thread"):
             self.frame_source.capture.bind_to_current_thread()
 
-        while self._is_running:
-            self.mutex.lock()
-            ctx = self._ctx
-            self.mutex.unlock()
+        try:
+            while self._is_running:
+                self.mutex.lock()
+                ctx = self._ctx
+                self.mutex.unlock()
 
-            if ctx:
-                t0 = time.perf_counter()
-                frame, gray = self.frame_source.get_frame(ctx)
-                cap_time = (time.perf_counter() - t0) * 1000
+                if ctx:
+                    t0 = time.perf_counter()
+                    frame, gray = self.frame_source.get_frame(ctx)
+                    cap_time = (time.perf_counter() - t0) * 1000
+                    
+                    if frame is not None and gray is not None:
+                        # 在背景直接判斷是否需要更新
+                        is_changed, _ = self.detector.detect_change(gray)
+                        
+                        # 檢查是否需要強制同步 (心跳)
+                        mon_now = time.monotonic()
+                        is_timeout = (mon_now - self._last_full_sync_ts > self.settings.sync_timeout_s)
+                        
+                        if is_changed or is_timeout:
+                            self._last_full_sync_ts = mon_now
+                            self._idle_streak = 0
+                            self.frame_ready.emit(frame, gray, t0, cap_time)
+                        else:
+                            self._idle_streak = min(self._idle_streak + 1, 30)
                 
-                if frame is not None and gray is not None:
-                    # 在背景直接判斷是否需要更新
-                    is_changed, _ = self.detector.detect_change(gray)
-                    
-                    # 檢查是否需要強制同步 (心跳)
-                    mon_now = time.monotonic()
-                    is_timeout = (mon_now - self._last_full_sync_ts > self.settings.sync_timeout_s)
-                    
-                    if is_changed or is_timeout:
-                        self._last_full_sync_ts = mon_now
-                        self._idle_streak = 0
-                        self.frame_ready.emit(frame, gray, t0, cap_time)
-                    else:
-                        self._idle_streak = min(self._idle_streak + 1, 30)
-            
-            # Adaptive capture pacing: static scenes use slower polling to reduce CPU.
-            base_interval = max(0.001, self.settings.refresh_ms / 1000.0)
-            if self._idle_streak >= 12:
-                sleep_s = min(0.10, base_interval * 3.0)
-            elif self._idle_streak >= 6:
-                sleep_s = min(0.06, base_interval * 2.0)
-            else:
-                sleep_s = base_interval
-            time.sleep(sleep_s)
+                # Adaptive capture pacing: static scenes use slower polling to reduce CPU.
+                base_interval = max(0.001, self.settings.refresh_ms / 1000.0)
+                if self._idle_streak >= 12:
+                    sleep_s = min(0.10, base_interval * 3.0)
+                elif self._idle_streak >= 6:
+                    sleep_s = min(0.06, base_interval * 2.0)
+                else:
+                    sleep_s = base_interval
+                time.sleep(sleep_s)
+        finally:
+            if hasattr(self.frame_source, "capture") and hasattr(self.frame_source.capture, "close"):
+                self.frame_source.capture.close()

@@ -156,6 +156,20 @@ class OverlayWindow(QMainWindow):
         self._last_calc_t_start = 0.0       # 紀錄最近一次運算開始的時間戳
         self._last_refresh_ts = time.perf_counter() # 紀錄上一次完整的刷新時間戳
         self._mirror_window: MirrorWindow | None = None
+        self._pipeline_profile_enabled = True
+        self._profile_last_ts = time.monotonic()
+        self._profile_capture_count = 0
+        self._profile_compute_count = 0
+        self._profile_last_paint_count = 0
+        self._profile_last_ui_delay_ms = 0.0
+        self._profile_last_frame_copy_ms = 0.0
+        self._profile_last_qimage_ms = 0.0
+        self._profile_last_pixmap_ms = 0.0
+        self._profile_last_compare_ms = 0.0
+        self._profile_last_update_data_ms = 0.0
+        self._profile_last_compute_ms = 0.0
+        self._profile_last_ui_ms = 0.0
+        self._profile_last_e2e_ms = 0.0
 
         self._snap_timer = QTimer(self)
         self._snap_timer.setSingleShot(True)
@@ -892,6 +906,7 @@ class OverlayWindow(QMainWindow):
 
     def _on_capture_finished(self, frame: np.ndarray, gray_frame: np.ndarray, t_captured_val: float, cap_time: float) -> None:
         """當背景擷取完成時觸發。"""
+        self._profile_capture_count += 1
         self._fps_count += 1
         now_ts = time.time()
         if now_ts - self._fps_last_report >= 1.0:
@@ -948,6 +963,9 @@ class OverlayWindow(QMainWindow):
                 self._last_full_sync_ts = mon_now
                 self._force_refresh = False
                 h, w = frame.shape[:2]
+                capture_done_ts = t_captured_val + (cap_time / 1000.0)
+                self._profile_last_ui_delay_ms = max(0.0, (t_start - capture_done_ts) * 1000.0)
+                copy_start = time.perf_counter()
                 if self._compare_mode:
                     half_w = w // 2
                     left_gray = np.ascontiguousarray(gray_frame[:, :half_w])
@@ -956,12 +974,14 @@ class OverlayWindow(QMainWindow):
                 else:
                     self.calc_worker.process_frame(gray_frame, self.settings)
                     self._last_calc_frame = frame.copy()
+                self._profile_last_frame_copy_ms = (time.perf_counter() - copy_start) * 1000.0
                 
                 self._last_calc_dpr = dpr
                 self._last_calc_t_start = t_start
                 self._last_calc_t_captured = t_captured_val
             
             self.canvas.update()
+            self._maybe_print_pipeline_profile()
                 
         except Exception as e:
             print(f"[Error] refresh_frame crash: {e}")
@@ -984,10 +1004,14 @@ class OverlayWindow(QMainWindow):
             final_rgb = logic_quantized
             
             self._frame_array = np.ascontiguousarray(final_rgb)
+            qimage_start = time.perf_counter()
             qimg = rgb_to_qimage(final_rgb)
+            self._profile_last_qimage_ms = (time.perf_counter() - qimage_start) * 1000.0
             
             qimg.setDevicePixelRatio(dpr)
+            pixmap_start = time.perf_counter()
             self._frame = QPixmap.fromImage(qimg)
+            self._profile_last_pixmap_ms = (time.perf_counter() - pixmap_start) * 1000.0
             # 更新分佈比例數據 (節流處理)
             now = time.time()
             if now - self._last_dist_update_ts >= 0.1:
@@ -996,7 +1020,9 @@ class OverlayWindow(QMainWindow):
                 self._last_dist_update_ts = now
             
             # 3. 處理對照圖
+            compare_start = time.perf_counter()
             if self._compare_mode:
+                h, w = frame.shape[:2]
                 if self.settings.compare_bw:
                     half_gray = self._last_gray_frame[:, :w]
                     gray_cont = np.ascontiguousarray(half_gray)
@@ -1009,33 +1035,19 @@ class OverlayWindow(QMainWindow):
                 self._raw_frame = QPixmap.fromImage(raw_qimg)
             else:
                 self._raw_frame = QPixmap()
+            self._profile_last_compare_ms = (time.perf_counter() - compare_start) * 1000.0
                 
+            update_data_start = time.perf_counter()
             self._update_canvas()
+            self._profile_last_update_data_ms = (time.perf_counter() - update_data_start) * 1000.0
             ui_end_time = time.perf_counter()
+            self._profile_compute_count += 1
+            self._profile_last_compute_ms = t_computed * 1000.0
+            self._profile_last_ui_ms = (ui_end_time - ui_start_time) * 1000.0
+            self._profile_last_e2e_ms = (ui_end_time - t_captured) * 1000.0
             
             # --- Profiling 測速節流輸出 ---
-            PROFILING = False
-            if PROFILING:
-                if not hasattr(self, '_last_profile_ts'):
-                    self._last_profile_ts = 0.0
-                now_ts = time.monotonic()
-                if now_ts - self._last_profile_ts > 0.33:
-                    self._last_profile_ts = now_ts
-                    c_cap = getattr(self, '_last_cap_time', 0.0)
-                    c_comp = t_computed * 1000
-                    c_ui = (ui_end_time - ui_start_time) * 1000
-                    c_total = c_cap + c_comp + c_ui
-                    
-                    s = self.settings
-                    lvl = s.levels
-                    b_on = "B" if (s.blur_enabled and s.blur_radius > 0) else "-"
-                    d_on = "D" if (s.dither_enabled and s.dither_strength > 0) else "-"
-                    e_on = "E" if (s.edge_enabled and s.edge_strength > 0) else "-"
-                    m_on = "M" if (s.morph_enabled and s.morph_strength > 0) else "-"
-                    comp_on = "C" if self._compare_mode else "-"
-                    
-                    state_str = f"[Lv:{lvl} {b_on}{d_on}{e_on}{m_on}{comp_on}]"
-                    print(f"[Profiling]{state_str} Cap:{c_cap:5.1f}ms | Calc:{c_comp:5.1f}ms | Render:{c_ui:5.1f}ms | Total:{c_total:5.1f}ms")
+            self._maybe_print_pipeline_profile()
 
             # 自動平衡邏輯
             if self._auto_balance_pending:
@@ -1072,6 +1084,45 @@ class OverlayWindow(QMainWindow):
             # 如果錄製視窗開啟中，則將渲染好的內容直接傳過去，避免沉重的 self.grab()
             if self._mirror_window and self._mirror_window.isVisible() and not self._frame.isNull():
                 self._mirror_window.update_frame(self._frame)
+
+    def _maybe_print_pipeline_profile(self) -> None:
+        if not self._pipeline_profile_enabled:
+            return
+
+        now_ts = time.monotonic()
+        elapsed = now_ts - self._profile_last_ts
+        if elapsed < 1.0:
+            return
+
+        paint_count = getattr(self.canvas, "paint_count", 0)
+        paint_delta = paint_count - self._profile_last_paint_count
+        capture_fps = self._profile_capture_count / elapsed
+        compute_fps = self._profile_compute_count / elapsed
+        paint_fps = paint_delta / elapsed
+        self._profile_last_ts = now_ts
+        self._profile_capture_count = 0
+        self._profile_compute_count = 0
+        self._profile_last_paint_count = paint_count
+
+        s = self.settings
+        enabled_filters = "".join((
+            "B" if (s.blur_enabled and s.blur_radius > 0) else "-",
+            "D" if (s.dither_enabled and s.dither_strength > 0) else "-",
+            "E" if (s.edge_enabled and s.edge_strength > 0) else "-",
+            "M" if (s.morph_enabled and s.morph_strength > 0) else "-",
+            "C" if self._compare_mode else "-",
+        ))
+        state_str = f"Lv:{s.levels} {enabled_filters}"
+        print(
+            "[Pipeline]"
+            f"[{state_str}] "
+            f"fps cap:{capture_fps:5.1f} calc:{compute_fps:5.1f} paint:{paint_fps:5.1f} | "
+            f"ms cap:{self._last_cap_time:5.1f} ui_wait:{self._profile_last_ui_delay_ms:5.1f} "
+            f"copy:{self._profile_last_frame_copy_ms:5.1f} calc:{self._profile_last_compute_ms:5.1f} "
+            f"qimg:{self._profile_last_qimage_ms:5.1f} pix:{self._profile_last_pixmap_ms:5.1f} "
+            f"cmp:{self._profile_last_compare_ms:5.1f} update:{self._profile_last_update_data_ms:5.1f} "
+            f"paint:{getattr(self.canvas, 'last_paint_ms', 0.0):5.1f} e2e:{self._profile_last_e2e_ms:5.1f}"
+        )
 
     def resizeEvent(self, event) -> None:
         """處理視窗縮放事件，清空快取緩衝區以適應新尺寸。"""

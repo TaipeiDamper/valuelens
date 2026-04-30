@@ -105,6 +105,7 @@ def get_quantization_lut(levels: int, min_val: int, max_val: int, exp_val: float
 
 # Bayer Cache
 _BAYER_CACHE: dict[tuple[int, int], np.ndarray] = {}
+_DITHER_OFFSET_CACHE: tuple[tuple[int, int, int], np.ndarray] | None = None
 
 def get_bayer_tiled(h: int, w: int) -> np.ndarray:
     key = (h, w)
@@ -124,6 +125,22 @@ def get_bayer_tiled(h: int, w: int) -> np.ndarray:
     tiled = np.tile(bayer_int, (h // 4 + 1, w // 4 + 1))[:h, :w]
     _BAYER_CACHE[key] = tiled
     return tiled
+
+
+def get_dither_offset(h: int, w: int, strength: int) -> np.ndarray:
+    global _DITHER_OFFSET_CACHE
+    strength = max(0, min(100, int(strength)))
+    key = (h, w, strength)
+    if _DITHER_OFFSET_CACHE is not None and _DITHER_OFFSET_CACHE[0] == key:
+        return _DITHER_OFFSET_CACHE[1]
+
+    bayer_tiled = get_bayer_tiled(h, w)
+    if strength >= 100:
+        offset = bayer_tiled
+    else:
+        offset = np.rint(bayer_tiled * (strength / 100.0)).astype(np.int16)
+    _DITHER_OFFSET_CACHE = (key, offset)
+    return offset
 
 def apply_bilateral(gray: np.ndarray, radius: int = 5) -> np.ndarray:
     if radius <= 0:
@@ -146,12 +163,16 @@ def apply_bilateral(gray: np.ndarray, radius: int = 5) -> np.ndarray:
     k = (radius * 2) | 1
     return cv2.GaussianBlur(gray, (k, k), 0)
 
-def apply_ordered_dither(gray: np.ndarray) -> np.ndarray:
+def apply_ordered_dither(gray: np.ndarray, strength: int = 100) -> np.ndarray:
+    strength = max(0, min(100, int(strength)))
+    if strength <= 0:
+        return gray
+
     h, w = gray.shape
-    bayer_tiled = get_bayer_tiled(h, w)
-    
+    dither_offset = get_dither_offset(h, w, strength)
+
     # 採用快速的 Int16 向量運算取代耗能的 Float32
-    res = gray.astype(np.int16) + bayer_tiled
+    res = gray.astype(np.int16) + dither_offset
     return np.clip(res, 0, 255).astype(np.uint8)
 
 
@@ -262,7 +283,7 @@ class DitherFilter(BaseFilter):
     def apply(self, ctx: FilterContext, **kwargs) -> None:
         strength = kwargs.get("dither_strength", 0)
         if strength > 0:
-            ctx.working_gray = apply_ordered_dither(ctx.working_gray)
+            ctx.working_gray = apply_ordered_dither(ctx.working_gray, strength)
 
 class EdgeFilter(BaseFilter):
     def apply(self, ctx: FilterContext, **kwargs) -> None:

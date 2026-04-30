@@ -517,8 +517,6 @@ class ControlPanel(QWidget):
         self.display_reset_btn.clicked.connect(self._reset_display_settings)
         self.clear_palette_btn.clicked.connect(self._clear_palette)
         self.clear_all_btn.clicked.connect(self._clear_all_settings)
-        self.save_startup_action.triggered.connect(self.save_startup_requested.emit)
-        self.clear_startup_action.triggered.connect(self.clear_startup_requested.emit)
 
         self.order_widget.filter_selected.connect(self._update_contextual_sliders)
         self._update_contextual_sliders("blur")
@@ -582,6 +580,8 @@ class ControlPanel(QWidget):
             widget = item.widget()
             if widget is not None:
                 widget.setParent(None)
+                if isinstance(widget, QLabel):
+                    widget.deleteLater()
                 
         # 2. 根據被點擊的濾鏡，動態載入滑桿
         if filter_name == "blur":
@@ -1152,5 +1152,4 @@ class DraggableOrderWidget(QWidget):
         self._clicked_idx = -1
         self._active_idx = -1
         self._has_dragged = False
-        self.update()
         self.update()

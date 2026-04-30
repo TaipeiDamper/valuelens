@@ -6,7 +6,7 @@ keyboard>=0.13
 pytest>=8.0
 pybind11>=2.12
 
-# Optional Windows DXGI capture benchmark backends.
-# Install manually only when comparing capture backends:
+# Optional Windows DXGI capture/runtime backends.
+# bettercam is used automatically on Windows when installed; mss remains the fallback.
 # dxcam
 # bettercam
