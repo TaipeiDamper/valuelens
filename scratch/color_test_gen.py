@@ -1,8 +1,13 @@
+import os
+import sys
+
+# 將專案路徑加入路徑
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import cv2
 import numpy as np
 import time
 import json
-import os
 
 def create_color_stress_test(output_path="color_test.mp4", duration_sec=10, fps=30):
     width, height = 1280, 720
@@ -77,10 +82,27 @@ def create_color_stress_test(output_path="color_test.mp4", duration_sec=10, fps=
         out.write(frame)
         
         # 紀錄真相 (Ground Truth)
+        # 使用與量化核心完全相同的 LUT 邏輯進行統計
+        from valuelens.core.quantize import get_quantization_lut
+        lut = get_quantization_lut(3, 64, 192, 0.0)
+        true_indices = cv2.LUT(gray, lut)
+        counts = np.bincount(true_indices.ravel(), minlength=3)
+        
+        black_pct = float(counts[0] / gray.size * 100)
+        gray_pct = float(counts[1] / gray.size * 100)
+        white_pct = float(counts[2] / gray.size * 100)
+        
+        # 簡單判定變動
+        is_changed = (f % 2 == 0) or (f % (fps * 2) == 0)
+        
         metadata.append({
             "frame": f,
             "avg_brightness": float(avg_v),
-            "phase": int(phase)
+            "phase": int(phase),
+            "black_pct": black_pct,
+            "gray_pct": gray_pct,
+            "white_pct": white_pct,
+            "is_changed": is_changed
         })
 
     out.release()

@@ -18,6 +18,12 @@ def bgr_to_qimage(image: np.ndarray) -> QImage:
     return QImage(rgb.data, w, h, rgb.strides[0], QImage.Format.Format_RGB888)
 
 
+def rgb_to_qimage(rgb: np.ndarray) -> QImage:
+    """直接將 RGB 陣列轉為 QImage，不進行顏色轉換。"""
+    h, w, _ = rgb.shape
+    return QImage(rgb.data, w, h, rgb.strides[0], QImage.Format.Format_RGB888)
+
+
 def gray_to_qimage(image: np.ndarray) -> QImage:
     gray = np.ascontiguousarray(image)
     h, w = gray.shape

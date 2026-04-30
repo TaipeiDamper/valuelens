@@ -8,16 +8,22 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from valuelens.core.quantize import quantize_gray_with_indices
-from valuelens.core.scene_detector import GridSceneDetector
+from valuelens.core.scene_detector import RandomSceneDetector
 
 def run_verification(video_path="test_pattern.mp4", meta_path="test_metadata.json"):
+    if not os.path.exists(video_path):
+        print(f"[Skip] {video_path} not found.")
+        return
+        
+    print(f"\n[Verify] Checking {video_path}...")
     with open(meta_path, 'r') as f:
         metadata = json.load(f)
 
     cap = cv2.VideoCapture(video_path)
-    detector = GridSceneDetector(threshold=20.0, grid_count=3)
+    from valuelens.core.scene_detector import RandomSceneDetector
+    detector = RandomSceneDetector(threshold=10.0, sample_count=256)
     
-    print(f"{'Frame':<6} | {'True (B/G/W)':<22} | {'Calc (B/G/W)':<22} | {'Error %':<8} | {'Detect'}")
+    print(f"{'Frame':<6} | {'Phase':<12} | {'True (B/G/W)':<12} | {'Calc (B/G/W)':<12} | {'Error %':<8} | {'Detect'}")
     print("-" * 85)
 
     frame_idx = 0
@@ -29,6 +35,9 @@ def run_verification(video_path="test_pattern.mp4", meta_path="test_metadata.jso
         if not ret:
             break
         
+        if frame_idx >= len(metadata):
+            break
+            
         meta = metadata[frame_idx]
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
@@ -43,13 +52,15 @@ def run_verification(video_path="test_pattern.mp4", meta_path="test_metadata.jso
             detect_status = "MISS" if true_changed else "FALSE"
 
         # 2. 測試比例計算 (Distribution)
-        # 使用與生成器相同的閥值 (64/192) 以確保理論一致性
-        out, indices, _ = quantize_gray_with_indices(
-            frame, levels=3, min_value=64, max_value=192, exp_value=0.0
+        # 使用與生成器相同的閥值 (64/192)
+        # 注意：關閉所有濾鏡 (process_order=[])，以確保與原始 Metadata 對齊
+        out, indices, edges, true_counts = quantize_gray_with_indices(
+            frame, levels=3, min_value=64, max_value=192, exp_value=0.0,
+            process_order=[]
         )
         
-        counts = np.bincount(indices.ravel(), minlength=3)
-        calc_pcts = (counts / indices.size) * 100
+        # 使用背景回傳的 true_counts (這已經是降採樣優化後的結果)
+        calc_pcts = (true_counts / np.sum(true_counts)) * 100
         true_pcts = [meta["black_pct"], meta["gray_pct"], meta["white_pct"]]
         
         # 計算平均誤差
@@ -70,4 +81,6 @@ def run_verification(video_path="test_pattern.mp4", meta_path="test_metadata.jso
     print(f"Scene Detection Accuracy: {(correct_detections / frame_idx) * 100:.2f}%")
 
 if __name__ == "__main__":
-    run_verification()
+    # 跑兩個 Video Test
+    run_verification("color_test.mp4", "color_test_meta.json")
+    run_verification("value_test.mp4", "value_test_meta.json")

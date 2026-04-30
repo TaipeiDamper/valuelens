@@ -1,8 +1,13 @@
+import os
+import sys
+
+# 將專案路徑加入路徑
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import cv2
 import numpy as np
 import time
 import json
-import os
 
 def create_value_test(output_path="value_test.mp4", duration_sec=10, fps=30):
     width, height = 1280, 720
@@ -46,10 +51,25 @@ def create_value_test(output_path="value_test.mp4", duration_sec=10, fps=30):
         out.write(bgr_frame)
         
         # 紀錄 Ground Truth
+        from valuelens.core.quantize import get_quantization_lut
+        lut = get_quantization_lut(3, 64, 192, 0.0)
+        true_indices = cv2.LUT(frame, lut)
+        counts = np.bincount(true_indices.ravel(), minlength=3)
+        
+        black_pct = float(counts[0] / frame.size * 100)
+        gray_pct = float(counts[1] / frame.size * 100)
+        white_pct = float(counts[2] / frame.size * 100)
+        is_changed = (f % fps == 0) or (f % 5 == 0) # 每 5 幀變一次
+        
         metadata.append({
             "frame": f,
             "avg_brightness": float(np.mean(frame)),
-            "timestamp": t
+            "timestamp": t,
+            "phase": f // fps,
+            "black_pct": black_pct,
+            "gray_pct": gray_pct,
+            "white_pct": white_pct,
+            "is_changed": is_changed
         })
 
     out.release()

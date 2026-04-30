@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QMainWindow, QToolButton
 from valuelens.config.settings import AppSettings, SettingsManager
 from valuelens.core.capture_service import CaptureService
 from valuelens.core.hotkey_service import HotkeyService
-from valuelens.core.qt_image import bgr_to_qimage, gray_to_qimage, qimage_to_bgr
+from valuelens.core.qt_image import bgr_to_qimage, gray_to_qimage, qimage_to_bgr, rgb_to_qimage
 from valuelens.core.quantize import native_distribution_from_indices, quantize_gray, quantize_gray_with_indices
 from valuelens.core.engine import ImageProcessWorker, AutoBalanceWorker, CaptureWorker
 from valuelens.core.scene_detector import RandomSceneDetector
@@ -71,16 +71,9 @@ class OverlayWindow(QMainWindow):
         self.cap_worker.frame_ready.connect(self._on_capture_finished)
         self.cap_worker.start()
         
-        # 初始化三層架構防線 (改為隨機採樣)：
-        # 1. 稀疏採樣 (Sparse) 用於背景變動檢測
+        # 初始化場景偵測器 (結合 MAE/MSE 與動態採樣)
         self.scene_detector = RandomSceneDetector(
-            threshold=self.settings.scene_threshold, 
-            sample_count=self.settings.sample_count
-        )
-        # 2. 稠密採樣 (Dense) 用於快速比例追蹤
-        self.dense_detector = RandomSceneDetector(
-            threshold=self.settings.scene_threshold, 
-            sample_count=max(1024, self.settings.sample_count * 4)
+            threshold=self.settings.scene_threshold
         )
         
         self._last_full_sync_ts = time.monotonic()
@@ -599,7 +592,7 @@ class OverlayWindow(QMainWindow):
         # 自動模式下實施 3 層混合校正架構 (100 -> 25 -> 25 -> 25 -> 100)
         if self._auto_continuous_enabled:
             # 統一使用稠密隨機採樣 (1024點) 進行平衡計算，兼顧速度與準確率
-            eval_data = self.dense_detector.get_sampled_pixels(source_gray)
+            eval_data = self.scene_detector.get_sampled_pixels(source_gray)
         else:
             eval_data = source_gray
             
@@ -887,8 +880,15 @@ class OverlayWindow(QMainWindow):
                 return # Bypass 模式不需進入 Compute 層
 
             # --- [決策層] 檢查是否需要啟動重度運算 (Compute 層) ---
-            should_calc = True # 強制全時運算，不受變動偵測阻擋
-            if not should_calc and not self._frame.isNull():
+            # 只有在以下情況下才執行運算：
+            # 1. 強制刷新 (_force_refresh)
+            # 2. 超時校正 (is_timeout)
+            # 3. 偵測到場景變動 (scene_detector.detect_change)
+            # 4. 目前沒有舊畫面快取
+            is_changed, mse_val = self.scene_detector.detect_change(gray_frame)
+            should_calc = self._force_refresh or is_timeout or is_changed or self._frame.isNull()
+            
+            if not should_calc:
                 self.canvas.update() # 畫面沒變，僅刷新畫布顯示舊緩存
                 return
 
@@ -930,11 +930,11 @@ class OverlayWindow(QMainWindow):
             # 釋放引用避免記憶體洩漏
             self._last_calc_frame = None
             
-            # 接收背景已經處理好（包含色盤、Edge Mix、Edge Color）的最終影像
-            final_bgr = logic_quantized
+            # 接收背景已經處理好（包含色盤、Edge Mix、Edge Color 以及 RGB 轉換）的最終影像
+            final_rgb = logic_quantized
             
-            self._frame_array = np.ascontiguousarray(cv2.cvtColor(final_bgr, cv2.COLOR_BGR2RGB))
-            qimg = bgr_to_qimage(final_bgr)
+            self._frame_array = np.ascontiguousarray(final_rgb)
+            qimg = rgb_to_qimage(final_rgb)
             
             qimg.setDevicePixelRatio(dpr)
             self._frame = QPixmap.fromImage(qimg)

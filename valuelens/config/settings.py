@@ -32,7 +32,7 @@ class AppSettings:
     morph_strength: int = 1
     morph_threshold: int = 35
     refresh_ms: int = 16
-    scene_threshold: float = 10.0
+    scene_threshold: float = 30.0
     sync_timeout_s: float = 1.0
     sample_count: int = 256
     x: int = 200

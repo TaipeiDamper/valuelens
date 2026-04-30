@@ -1,59 +1,63 @@
 import numpy as np
+from typing import Tuple
 
 class RandomSceneDetector:
     """
     隨機點場景變更檢測器 (Random Point Scene Detector)。
-    在全圖隨機採樣固定數量的像素點進行比對，消除井字網格的死角，且運算量極低。
+    結合 MAE (平均絕對誤差) 與 MSE (均方誤差) 指標。
+    每次偵測到變動後會自動更換部分採樣點，消除盲區。
     """
-    def __init__(self, threshold: float = 20.0, sample_count: int = 256):
+    def __init__(self, threshold: float = 30.0, sample_count: int = 256):
         self.threshold = threshold
         self.sample_count = sample_count
-        self.coords = None  # 隨機座標快取
-        self.last_signature = None
+        self.last_samples = None
+        self.sample_indices = None
+        self.last_shape = None
 
-    def _get_coords(self, h, w):
-        """生成並快取隨機座標"""
-        if self.coords is None or self.coords_shape != (h, w):
-            # 使用固定種子確保同一個解析度下的採樣點是固定的，方便比對
-            rng = np.random.default_rng(42)
-            y = rng.integers(0, h, size=self.sample_count)
-            x = rng.integers(0, w, size=self.sample_count)
-            self.coords = (y, x)
-            self.coords_shape = (h, w)
-        return self.coords
+    def _regen_samples(self, shape: Tuple[int, int]):
+        """重新生成隨機採樣點。"""
+        h, w = shape
+        self.sample_indices = (
+            np.random.randint(0, h, self.sample_count),
+            np.random.randint(0, w, self.sample_count)
+        )
+        self.last_shape = shape
 
     def get_sampled_pixels(self, gray_frame: np.ndarray) -> np.ndarray:
-        """獲取隨機採樣點的像素值"""
-        h, w = gray_frame.shape[:2]
-        y_idx, x_idx = self._get_coords(h, w)
-        return gray_frame[y_idx, x_idx]
+        """獲取目前隨機採樣點的像素值。"""
+        if self.sample_indices is None or self.last_shape != gray_frame.shape:
+            self._regen_samples(gray_frame.shape)
+        return gray_frame[self.sample_indices]
 
-    def detect_change(self, gray_frame: np.ndarray) -> tuple[bool, float]:
-        """
-        比對隨機採樣點的差異，返回 (是否超過變更門檻, 變動強度)。
-        """
-        if gray_frame is None or gray_frame.size == 0:
+    def detect_change(self, gray_frame: np.ndarray) -> Tuple[bool, float]:
+        """偵測畫面是否有顯著變動。回傳 (是否變動, MSE值)。"""
+        if gray_frame is None:
             return False, 0.0
-            
-        h, w = gray_frame.shape[:2]
-        y_idx, x_idx = self._get_coords(h, w)
+
+        h, w = gray_frame.shape
         
-        # 取得採樣像素值
-        current_pixels = gray_frame[y_idx, x_idx]
+        # 初始化或解析度改變時重新採樣
+        if self.sample_indices is None or self.last_shape != (h, w):
+            self._regen_samples((h, w))
+            self.last_samples = gray_frame[self.sample_indices]
+            return True, 0.0
+
+        current_samples = gray_frame[self.sample_indices]
         
-        # 首次初始化
-        if self.last_signature is None:
-            self.last_signature = current_pixels.copy()
-            return True, 255.0
-            
-        # 計算平均絕對誤差 (MAE)
-        diff = np.abs(current_pixels.astype(np.float32) - self.last_signature.astype(np.float32))
-        mae = float(np.mean(diff))
+        # 同時計算 MAE 與 MSE
+        diff = current_samples.astype(np.float32) - self.last_samples.astype(np.float32)
+        # mae = np.mean(np.abs(diff)) # 暫時備用
+        mse = np.mean(diff ** 2)
         
-        is_changed = mae > self.threshold
+        # 只要 MSE 超過門檻就判定為變更
+        is_changed = mse > self.threshold
         
-        # 累積偵測：只有變動顯著時才更新基準點
         if is_changed:
-            self.last_signature = current_pixels.copy()
+            self.last_samples = current_samples
+            # [優化]：偵測到大變動後，隨機更換 20% 的採樣點，增加未來檢測的覆蓋率
+            replace_count = max(1, self.sample_count // 5)
+            replace_idx = np.random.choice(self.sample_count, replace_count, replace=False)
+            self.sample_indices[0][replace_idx] = np.random.randint(0, h, replace_count)
+            self.sample_indices[1][replace_idx] = np.random.randint(0, w, replace_count)
             
-        return is_changed, mae
+        return is_changed, mse

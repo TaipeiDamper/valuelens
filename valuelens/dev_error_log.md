@@ -27,3 +27,14 @@
 *   **發生的錯誤**：在畫面變動微小時，MAE 門檻未觸發，導致影像更新被鎖死在 1s 一次的超時刷新。
 *   **預計的改善**：為了極速體驗，目前強制將 `should_calc` 設為 `True`。
 *   **教訓**：在追求高 FPS 的場景下，變動偵測應作為可選的「省電模式」，而非強制守門員。
+## ❌ 錯誤 6：OpenCV LUT 通道不匹配 (Assertion Failed)
+*   **改錯的東西**：嘗試用 `cv2.LUT` 將單通道的索引矩陣 (Indices) 直接映射到三通道的 BGR 查表。
+*   **發生的錯誤**：OpenCV 報錯 `(lutcn == cn || lutcn == 1)` 斷言失敗。單通道輸入不支援三通道輸出。
+*   **教訓**：在進行「單通道轉多通道」的映射時，NumPy 的進階索引 (`lut[indices]`) 比 `cv2.LUT` 更靈活且不容易報錯。
+*   **修改方式**：將 `cv2.LUT` 替換為 `full_lut_bgr[ctx.indices]`。
+
+## ❌ 錯誤 7：冗餘的顏色空間轉換 (Double Conversion)
+*   **改錯的東西**：在主執行緒同時呼叫 `cv2.cvtColor` 與 `bgr_to_qimage` (內部含 `cvtColor`)。
+*   **發生的錯誤**：對 4K 影像進行了兩次重複的 RGB 轉換，浪費 UI 執行緒資源。
+*   **教訓**：影像應該在背景執行緒一次性轉為最終格式（RGB），主執行緒只負責顯示。
+*   **修改方式**：將 `cvtColor` 移至 `quantize_gray_with_indices` 結尾，並新增 `rgb_to_qimage` 輔助函式。

@@ -282,13 +282,13 @@ def quantize_gray_with_indices(
 
     # --- 建立彩色 3-Channel LUT ---
     # 我們在這裡一次搞定所有顏色映射與 Edge Mix
-    full_lut_bgr = np.zeros((1, 256, 3), dtype=np.uint8)
+    full_lut_bgr = np.zeros((256, 3), dtype=np.uint8)
     mix = (edge_mix / 100.0) if ctx.edges is not None else 0.0
     
     if palette and len(palette) == levels:
         for i, color in enumerate(palette):
             r, g, b = color
-            full_lut_bgr[0, i] = [
+            full_lut_bgr[i] = [
                 int(b * (1.0 - mix) + 255.0 * mix),
                 int(g * (1.0 - mix) + 255.0 * mix),
                 int(r * (1.0 - mix) + 255.0 * mix)
@@ -297,18 +297,21 @@ def quantize_gray_with_indices(
         for i in range(levels):
             val = out_lut[i]
             mixed_val = int(val * (1.0 - mix) + 255.0 * mix)
-            full_lut_bgr[0, i] = [mixed_val, mixed_val, mixed_val]
+            full_lut_bgr[i] = [mixed_val, mixed_val, mixed_val]
 
-    # 直接進行彩色查表
-    out = cv2.LUT(ctx.indices, full_lut_bgr)
+    # 直接進行彩色查表 (NumPy 方式)
+    out_bgr = full_lut_bgr[ctx.indices]
     
     # 處理邊緣顏色
     if ctx.edges is not None and edge_color:
         ec_bgr = edge_color[::-1] # RGB -> BGR
-        out[ctx.edges > 0] = ec_bgr
+        out_bgr[ctx.edges > 0] = ec_bgr
 
     # 處理形態學遮罩
     if ctx.morph_mask is not None:
-        out[ctx.morph_mask] = 0
+        out_bgr[ctx.morph_mask] = 0
         
-    return out, ctx.indices, ctx.edges, true_counts
+    # 在背景執行緒完成 RGB 轉換，徹底解放主執行緒
+    out_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+    
+    return out_rgb, ctx.indices, ctx.edges, true_counts
