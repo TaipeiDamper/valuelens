@@ -103,8 +103,8 @@ def get_quantization_lut(levels: int, min_val: int, max_val: int, exp_val: float
     _CURRENT_QUANT_LUT = (params, idx)
     return idx
 
-# Bayer Cache
 _BAYER_CACHE: dict[tuple[int, int], np.ndarray] = {}
+_BAYER_CACHE_MAX = 4
 _DITHER_OFFSET_CACHE: tuple[tuple[int, int, int], np.ndarray] | None = None
 
 def get_bayer_tiled(h: int, w: int) -> np.ndarray:
@@ -123,6 +123,9 @@ def get_bayer_tiled(h: int, w: int) -> np.ndarray:
     bayer_int = np.round((bayer + 0.5) * (255.0 / 32.0) - 64.0).astype(np.int16)
     
     tiled = np.tile(bayer_int, (h // 4 + 1, w // 4 + 1))[:h, :w]
+    # 限制快取大小，避免無限增長
+    if len(_BAYER_CACHE) >= _BAYER_CACHE_MAX:
+        _BAYER_CACHE.pop(next(iter(_BAYER_CACHE)))
     _BAYER_CACHE[key] = tiled
     return tiled
 
@@ -245,6 +248,7 @@ class FilterContext:
     """
     影像處理管線的 Context 封裝箱（狀態管理者）。
     負責存放原始影像與各階段衍生資料，確保資料流向明確。
+    使用延遲複製 (lazy copy) 最佳化：只有在濾鏡實際修改 working_gray 時才建立副本。
     """
     def __init__(self, bgr: np.ndarray, levels: int, min_val: int, max_val: int, exp_val: float, curve_mode: int = 0, buffer_manager: Any = None):
         self.levels = max(2, int(levels))
@@ -254,19 +258,35 @@ class FilterContext:
         self.curve_mode = int(curve_mode)
         self.buffer_manager = buffer_manager
         
-        # 【超高清輸入源】：強制使用副本，徹底隔離後續濾鏡的污染
+        # 轉灰階（只做一次 cvtColor）
         if len(bgr.shape) == 3 and bgr.shape[2] == 3:
             self.original_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         else:
-            self.original_gray = bgr.copy()
+            self.original_gray = bgr
         
-        # 【Ａ軌】：主色調畫布（必須是另一個獨立複本）
-        self.working_gray = self.original_gray.copy()
+        # 延遲複製：初始指向同一塊記憶體，僅在需要修改時才複製
+        self._working_gray_dirty = False
+        self._working_gray = self.original_gray
         
-        # 【成果輸出區】
+        # 成果輸出區
         self.indices = None      # 量化後的色彩索引陣列
         self.edges = None        # 連線（Canny）偵測結果
         self.morph_mask = None   # 勾邊遮罩結果
+
+    @property
+    def working_gray(self) -> np.ndarray:
+        return self._working_gray
+
+    @working_gray.setter
+    def working_gray(self, value: np.ndarray) -> None:
+        self._working_gray = value
+        self._working_gray_dirty = True
+
+    def ensure_working_copy(self) -> None:
+        """確保 working_gray 是獨立副本（在需要就地修改前呼叫）。"""
+        if not self._working_gray_dirty:
+            self._working_gray = self.original_gray.copy()
+            self._working_gray_dirty = True
 
 
 class BaseFilter:

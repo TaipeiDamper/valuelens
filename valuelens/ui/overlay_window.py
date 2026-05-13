@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ctypes
-import itertools
 import sys
 import time
 from dataclasses import asdict
@@ -9,7 +8,7 @@ from ctypes import wintypes
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QPoint, QRect, Qt, QTimer, QThread, Signal
+from PySide6.QtCore import QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QMainWindow, QToolButton
 
@@ -112,6 +111,8 @@ class OverlayWindow(QMainWindow):
             central.setMouseTracking(True)
 
         self._drag_pos: QPoint | None = None
+        self._last_frame_signature = None
+        self._pan_start_offset = None
         self._resize_edges = 0
         self._resize_start_geom: QRect | None = None
         self._resize_start_global: QPoint | None = None
@@ -297,59 +298,6 @@ class OverlayWindow(QMainWindow):
             pix = self.grab(self._lens_rect())
             
         cb.setPixmap(pix)
-
-    def on_debug_screenshot_requested(self) -> None:
-        """偵錯模式：從系統層級擷取全螢幕（強制包含 ValueLens 視窗本身）。"""
-        from PySide6.QtWidgets import QApplication
-        import time
-        import ctypes
-        
-        # 1. 強制解除隱身 (確保 Windows DWM 將其納入擷取範圍)
-        hwnd = self.effectiveWinId()
-        if hwnd:
-            # WDA_NONE = 0
-            ctypes.windll.user32.SetWindowDisplayAffinity(int(hwnd), 0)
-        
-        # 2. 強制重繪並等待 DWM 生效
-        self.update()
-        QApplication.processEvents()
-        time.sleep(0.3)  # 給 DWM 稍長時間反應
-
-        # 3. 擷取螢幕 (利用 MSS 擷取主螢幕)
-        sct = self.capture._sct
-        monitor = sct.monitors[0]  # 抓取整個虛擬螢幕 (All monitors)
-        shot = sct.grab(monitor)
-        
-        from PySide6.QtGui import QImage, QPixmap
-        img = QImage(shot.raw, shot.width, shot.height, QImage.Format.Format_ARGB32)
-        pix = QPixmap.fromImage(img)
-
-        # 4. 存入剪貼簿
-        cb = QApplication.clipboard()
-        cb.setPixmap(pix)
-        print("[Debug] Full screen (including window) captured to clipboard.")
-        
-        # 5. 恢復目前的模式隱身狀態
-        is_live = not self.frame_source.is_static
-        self.capture.set_affinity(hwnd, is_live)
-
-    def on_save_startup_preset(self) -> None:
-        """將目前的所有參數儲存為啟動預設。"""
-        from dataclasses import asdict
-        # 排除非參數類的欄位 (如視窗位置 x, y)
-        current = asdict(self.settings)
-        excluded = {'x', 'y', 'width', 'height', 'startup_preset', 'enabled'}
-        preset = {k: v for k, v in current.items() if k not in excluded}
-        
-        self.settings.startup_preset = preset
-        self.settings_manager.save(self.settings)
-        print("[Presets] Current configuration saved as Startup Preset.")
-
-    def on_clear_startup_preset(self) -> None:
-        """清除啟動預設，改回恢復上次關閉狀態。"""
-        self.settings.startup_preset = None
-        self.settings_manager.save(self.settings)
-        print("[Presets] Startup Preset cleared.")
 
     def _apply_startup_preset(self, preset: dict) -> None:
         """將預設集的資料填充進目前的 settings 物件中。"""
@@ -1132,13 +1080,6 @@ class OverlayWindow(QMainWindow):
             f"paint:{getattr(self.canvas, 'last_paint_ms', 0.0):5.1f} e2e:{self._profile_last_e2e_ms:5.1f}"
         )
 
-    def resizeEvent(self, event) -> None:
-        """處理視窗縮放事件，清空快取緩衝區以適應新尺寸。"""
-        super().resizeEvent(event)
-        if hasattr(self, 'engine_worker'):
-            self.engine_worker.buffer_manager.clear()
-        self.request_refresh(10)
-
     # paintEvent 與 _draw_manual_button 已經搬移至 RenderWidget (valuelens/ui/render_widget.py)
 
 
@@ -1242,7 +1183,7 @@ class OverlayWindow(QMainWindow):
             "name": name,
             "data": settings_dict
         }
-        self.store._manager.save(self.settings)
+        self.store.force_save()
         self.panel.update_presets_ui(self.settings.presets)
 
     def on_load_preset(self, index: int) -> None:
@@ -1291,7 +1232,7 @@ class OverlayWindow(QMainWindow):
 
     def on_clear_preset(self, index: int) -> None:
         self.settings.presets[index] = None
-        self.store._manager.save(self.settings)
+        self.store.force_save()
         self.panel.update_presets_ui(self.settings.presets)
 
     def on_save_startup_preset(self) -> None:
@@ -1299,11 +1240,11 @@ class OverlayWindow(QMainWindow):
         for key in ["presets", "startup_preset", "x", "y", "width", "height"]:
             if key in settings_dict: del settings_dict[key]
         self.settings.startup_preset = settings_dict
-        self.store._manager.save(self.settings)
+        self.store.force_save()
 
     def on_clear_startup_preset(self) -> None:
         self.settings.startup_preset = None
-        self.store._manager.save(self.settings)
+        self.store.force_save()
 
     def on_debug_screenshot_requested(self) -> None:
         # 如果有實作擷取全螢幕的方法則呼叫，否則使用一般截圖
@@ -1500,33 +1441,26 @@ class OverlayWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """關閉視窗時確保所有背景執行緒都已停止。"""
+        # 1. 停止所有計時器
         self.timer.stop()
+        self._coalesce_timer.stop()
+        self._snap_timer.stop()
+        
+        # 2. 停止所有背景執行緒
         self.cap_worker.stop()
         self.calc_worker.stop()
-        from dataclasses import asdict
-        current_dict = asdict(self.settings)
+        self.auto_balance_worker.stop()
         
-        # 排除遞迴欄位以防止序列化深度溢出
+        # 3. 序列化目前狀態以供下次啟動還原
+        current_dict = asdict(self.settings)
         for key in ["presets", "startup_preset", "last_state", "last_color_state", "x", "y", "width", "height"]:
-            if key in current_dict:
-                del current_dict[key]
-                
+            current_dict.pop(key, None)
         self.settings.last_state = current_dict
         if getattr(self.settings, 'custom_palette', []):
             self.settings.last_color_state = current_dict
-            
-        self.store._manager.save(self.settings)
+        self.store.force_save()
         
-        # 停止背景更新機制與執行緒 (避免 QThread Leak)
-        if hasattr(self, "timer"):
-            self.timer.stop()
-        self._coalesce_timer.stop()
-        if hasattr(self, "calc_worker"):
-            self.calc_worker.stop()
-        if hasattr(self, "auto_balance_worker"):
-            self.auto_balance_worker.stop()
-            
-        # 釋放全域快速鍵與子視窗
+        # 4. 釋放全域快速鍵與子視窗
         self.hotkeys.shutdown()
         self.panel.close()
         self.image_mode.close()

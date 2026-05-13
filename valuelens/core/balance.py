@@ -153,12 +153,19 @@ def optimize_balance_params(
                             mapped = x_g / (x_g + (1.0 - x_base + 1e-6)**gamma)
                         else:
                             k = (ex + 2.0) * 10.0
+                            if k < 0.1: k = 0.1
                             mapped = np.log(1.0 + k * x_base) / np.log(1.0 + k)
                             
                         idx = (mapped * levels).astype(np.int32)
                         idx[idx >= levels] = levels - 1
                         cnts = np.bincount(idx, weights=hist, minlength=levels)
-                        dist = _fold_level_values_to_wgb(cnts) / total
+                        # 3 階直接映射，跳過 permutation 搜尋
+                        if levels == 3:
+                            dist = cnts[::-1].astype(np.float64) / total
+                        elif levels == 2:
+                            dist = np.array([cnts[1], 0.0, cnts[0]], dtype=np.float64) / total
+                        else:
+                            dist = _fold_level_values_to_wgb(cnts) / total
                         loss = np.sum((dist - target_ratios)**2)
                         if loss < b_l:
                             b_l = loss

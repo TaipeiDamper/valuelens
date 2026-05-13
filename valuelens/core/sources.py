@@ -84,6 +84,10 @@ class StaticImageSource(IFrameSource):
         self.zoom_factor = 1.0
         self.pan_offset_x = 0.0
         self.pan_offset_y = 0.0
+        # 快取上次的渲染結果，避免靜態模式下重複運算
+        self._cache_key: tuple | None = None
+        self._cache_frame: np.ndarray | None = None
+        self._cache_gray: np.ndarray | None = None
         
     @property
     def is_static(self) -> bool:
@@ -135,6 +139,11 @@ class StaticImageSource(IFrameSource):
             self.pan_offset_y = max(0, min(self.pan_offset_y, vsh - view_h_phys))
         else:
             self.pan_offset_y = (vsh - view_h_phys) / 2
+
+        # 快取檢查：如果參數沒變就直接回傳上次結果
+        cache_key = (self.zoom_factor, self.pan_offset_x, self.pan_offset_y, view_w_phys, view_h_phys)
+        if self._cache_key == cache_key and self._cache_frame is not None:
+            return self._cache_frame, self._cache_gray
             
         sx1 = max(0, int(round(self.pan_offset_x / self.zoom_factor)))
         sy1 = max(0, int(round(self.pan_offset_y / self.zoom_factor)))
@@ -159,8 +168,12 @@ class StaticImageSource(IFrameSource):
                     frame[dy:dy+jh, dx:dx+jw] = resized_crop[:jh, :jw]
                 
                 gray = cv2.cvtColor(resized_crop, cv2.COLOR_BGR2GRAY)
+                self._cache_key = cache_key
+                self._cache_frame = frame
+                self._cache_gray = gray
                 return frame, gray
                 
         # 失敗或無效範圍
         frame = np.full((view_h_phys, view_w_phys, 3), 34, dtype=np.uint8)
         return frame, None
+
