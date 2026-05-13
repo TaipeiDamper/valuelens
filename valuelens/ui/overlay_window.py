@@ -364,8 +364,10 @@ class OverlayWindow(QMainWindow):
             # 恢復即時模式
             from ..core.sources import LiveScreenSource
             self.frame_source = LiveScreenSource(self.capture)
+            self.cap_worker.update_frame_source(self.frame_source)
             self._static_source_type = ""
             self._full_image_gray = None
+            self._is_static_mode = False
             self.panel.freeze_btn.setProperty("freeze_mode", "")
             self.panel.freeze_btn.style().unpolish(self.panel.freeze_btn)
             self.panel.freeze_btn.style().polish(self.panel.freeze_btn)
@@ -393,8 +395,11 @@ class OverlayWindow(QMainWindow):
             if frame is not None:
                 from ..core.sources import StaticImageSource
                 self.frame_source = StaticImageSource(frame.copy(), "frozen")
+                self.cap_worker.update_frame_source(self.frame_source)
                 self._static_source_type = "frozen"
                 self._full_image_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                self._is_static_mode = True
+                self._use_global_calc = True
                 
                 # 靜態模式解除隱身，方便使用者截圖
                 self.capture.set_affinity(self.effectiveWinId(), False)
@@ -422,8 +427,11 @@ class OverlayWindow(QMainWindow):
         print(f"[DEBUG][User Action] 匯入靜態圖片, 大小={bgr_image.shape}")
         from ..core.sources import StaticImageSource
         self.frame_source = StaticImageSource(bgr_image, "image")
+        self.cap_worker.update_frame_source(self.frame_source)
         self._static_source_type = "image"
         self._full_image_gray = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY)
+        self._is_static_mode = True
+        self._use_global_calc = True
         # 靜態模式解除隱身
         self.capture.set_affinity(self.effectiveWinId(), False)
 

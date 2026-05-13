@@ -178,6 +178,18 @@ class CaptureWorker(QThread):
         self._last_full_sync_ts = 0.0
         self._idle_streak = 0
 
+    def update_frame_source(self, new_source):
+        """切換影像來源 (例如從即時→靜態)，同時重置場景偵測器以強制發送首幀。"""
+        self.mutex.lock()
+        self.frame_source = new_source
+        # 重置偵測器狀態，確保新來源的第一幀一定被發送
+        self.detector.last_samples = None
+        self.detector.sample_indices = None
+        self.detector.last_shape = None
+        self._last_full_sync_ts = 0.0
+        self._idle_streak = 0
+        self.mutex.unlock()
+
     def update_context(self, ctx):
         self.mutex.lock()
         self._ctx = ctx
@@ -203,31 +215,42 @@ class CaptureWorker(QThread):
             while self._is_running:
                 self.mutex.lock()
                 ctx = self._ctx
+                source = self.frame_source
                 self.mutex.unlock()
 
                 if ctx:
                     t0 = time.perf_counter()
-                    frame, gray = self.frame_source.get_frame(ctx)
+                    frame, gray = source.get_frame(ctx)
                     cap_time = (time.perf_counter() - t0) * 1000
                     
                     if frame is not None and gray is not None:
-                        # 在背景直接判斷是否需要更新
-                        is_changed, _ = self.detector.detect_change(gray)
-                        
-                        # 檢查是否需要強制同步 (心跳)
-                        mon_now = time.monotonic()
-                        is_timeout = (mon_now - self._last_full_sync_ts > self.settings.sync_timeout_s)
-                        
-                        if is_changed or is_timeout:
+                        # 靜態來源：每次都發送（使用者調整參數時需要即時反饋）
+                        if source.is_static:
+                            mon_now = time.monotonic()
                             self._last_full_sync_ts = mon_now
                             self._idle_streak = 0
                             self.frame_ready.emit(frame, gray, t0, cap_time)
                         else:
-                            self._idle_streak = min(self._idle_streak + 1, 30)
+                            # 即時來源：使用場景偵測節流
+                            is_changed, _ = self.detector.detect_change(gray)
+                            
+                            # 檢查是否需要強制同步 (心跳)
+                            mon_now = time.monotonic()
+                            is_timeout = (mon_now - self._last_full_sync_ts > self.settings.sync_timeout_s)
+                            
+                            if is_changed or is_timeout:
+                                self._last_full_sync_ts = mon_now
+                                self._idle_streak = 0
+                                self.frame_ready.emit(frame, gray, t0, cap_time)
+                            else:
+                                self._idle_streak = min(self._idle_streak + 1, 30)
                 
                 # Adaptive capture pacing: static scenes use slower polling to reduce CPU.
                 base_interval = max(0.001, self.settings.refresh_ms / 1000.0)
-                if self._idle_streak >= 12:
+                if source.is_static:
+                    # 靜態模式下使用固定間隔，避免節流導致回應遲鈍
+                    sleep_s = base_interval
+                elif self._idle_streak >= 12:
                     sleep_s = min(0.10, base_interval * 3.0)
                 elif self._idle_streak >= 6:
                     sleep_s = min(0.06, base_interval * 2.0)
@@ -235,5 +258,8 @@ class CaptureWorker(QThread):
                     sleep_s = base_interval
                 time.sleep(sleep_s)
         finally:
-            if hasattr(self.frame_source, "capture") and hasattr(self.frame_source.capture, "close"):
-                self.frame_source.capture.close()
+            self.mutex.lock()
+            final_source = self.frame_source
+            self.mutex.unlock()
+            if hasattr(final_source, "capture") and hasattr(final_source.capture, "close"):
+                final_source.capture.close()
